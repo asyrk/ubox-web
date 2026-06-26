@@ -1,3 +1,7 @@
+# IMPORTANT
+
+This project was 100% vibecoded. I have not reviewed this code, nor did I code anything that you can see here. I needed a web viewer and asked the AI to do it - and after few days it came up with this. Use at your own risk, I take no responsibility for this project, I will not maintain it, I will not accept pull requests.
+
 # UBox Web
 
 Unofficial local web viewer for UBox-compatible cameras. It logs in to your UBox
@@ -219,4 +223,4 @@ WTFPL. See [LICENSE](LICENSE).
 
 Use this only with accounts and cameras you own or are authorized to access.
 This project stores credentials locally and talks to the same UBox cloud services
-used by the official app, but it is not endorsed by the vendor.
+used by the official app, but it is not endorsed by nor affiliated with the vendor.
