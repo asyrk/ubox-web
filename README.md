@@ -32,6 +32,8 @@ Still experimental:
 - WebCodecs is required for live playback. Use a Chromium-based browser.
 - The project is a local viewer, not a packaged desktop app yet.
 
+<img width="963" height="863" alt="image" src="https://github.com/user-attachments/assets/0da3c2c6-22b6-49d4-a162-a0eee0f869e0" />
+
 ## Why It Works This Way
 
 The Android app does not expose a simple RTSP or HTTP video URL. Its live view
