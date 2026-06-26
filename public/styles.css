@@ -1,0 +1,303 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1d2430;
+  --muted: #647082;
+  --line: #d9dee7;
+  --brand: #146c94;
+  --brand-strong: #0f526f;
+  --accent: #d9822b;
+  --bad: #a33a3a;
+  --good: #287a4b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 "Segoe UI", Arial, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  min-height: 36px;
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: #fff;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--brand-strong);
+}
+
+.ghost {
+  background: transparent;
+}
+
+.app {
+  width: min(1180px, calc(100vw - 32px));
+  margin: 24px auto;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.panel-head.compact {
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+#status,
+.muted {
+  color: var(--muted);
+}
+
+.login-form {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+}
+
+label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+}
+
+input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--brand);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.devices {
+  display: grid;
+  gap: 8px;
+}
+
+.devices.empty {
+  color: var(--muted);
+}
+
+.device {
+  width: 100%;
+  text-align: left;
+  min-height: 64px;
+  padding: 10px;
+  display: grid;
+  gap: 2px;
+}
+
+.device.active {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px rgba(20, 108, 148, 0.12);
+}
+
+.device strong {
+  font-size: 14px;
+}
+
+.device span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.video-shell {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #151a20;
+  border: 1px solid #2b333d;
+}
+
+.dual-video-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.camera-view {
+  min-width: 0;
+}
+
+.camera-title {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #151a20;
+}
+
+.video-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  text-align: center;
+  color: #dbe3ee;
+}
+
+.actions,
+.manual {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  align-items: end;
+}
+
+.capture-player {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.capture-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.capture-status {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.manual label {
+  flex: 1;
+}
+
+.output {
+  min-height: 120px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101418;
+  color: #e7edf5;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.playback-log {
+  min-height: 96px;
+  max-height: 180px;
+  background: #151a20;
+}
+
+.ok {
+  color: var(--good);
+}
+
+.error {
+  color: var(--bad);
+}
+
+@media (max-width: 820px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .dual-video-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .row,
+  .actions,
+  .manual {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .capture-row {
+    display: grid;
+  }
+}

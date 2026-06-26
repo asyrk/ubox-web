@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UBox Web</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel login-panel">
+        <div class="panel-head">
+          <div>
+            <h1>UBox Web</h1>
+            <p id="status">Not connected</p>
+          </div>
+          <button id="logoutBtn" class="ghost" type="button" hidden>Log out</button>
+        </div>
+
+        <form id="loginForm" class="login-form">
+          <label>
+            Account
+            <input id="account" autocomplete="username" required />
+          </label>
+          <label>
+            Password
+            <input id="password" type="password" autocomplete="current-password" required />
+          </label>
+          <div class="row">
+            <label>
+              Language
+              <input id="lang" value="en" maxlength="8" />
+            </label>
+            <label>
+              Region
+              <input id="region" value="US" maxlength="8" />
+            </label>
+          </div>
+          <details>
+            <summary>Advanced login fields</summary>
+            <div class="row">
+              <label>
+                App
+                <input id="appName" value="UBox" />
+              </label>
+              <label>
+                Device type
+                <input id="deviceType" type="number" value="1" min="0" />
+              </label>
+            </div>
+          </details>
+          <button class="primary" type="submit">Log In</button>
+        </form>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel devices-panel">
+          <div class="panel-head compact">
+            <h2>Cameras</h2>
+            <button id="refreshBtn" type="button" disabled>Refresh</button>
+          </div>
+          <div id="devices" class="devices empty">Log in to load cameras.</div>
+        </aside>
+
+        <section class="panel viewer-panel">
+          <div class="panel-head compact">
+            <h2>Viewer</h2>
+            <span id="selectedDevice" class="muted">No camera selected</span>
+          </div>
+          <div class="dual-video-grid">
+            <div class="camera-view">
+              <div class="camera-title">Cam 0</div>
+              <div class="video-shell">
+                <video id="cam0Video" autoplay playsinline controls muted></video>
+                <div id="cam0Hint" class="video-hint">No captured stream loaded.</div>
+              </div>
+            </div>
+            <div class="camera-view">
+              <div class="camera-title">Cam 1</div>
+              <div class="video-shell">
+                <video id="cam1Video" autoplay playsinline controls muted></video>
+                <div id="cam1Hint" class="video-hint">No captured stream loaded.</div>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="tokenBtn" type="button" disabled>Get Feed Token</button>
+            <button id="copyBtn" class="ghost" type="button" disabled>Copy Token JSON</button>
+          </div>
+          <div class="capture-player">
+            <div class="capture-row">
+              <button id="captureRefreshBtn" type="button">Check Captured H.264</button>
+              <button id="playBothBtn" type="button" disabled>Play Both</button>
+              <button id="playCam0Btn" type="button" disabled>Play Cam 0</button>
+              <button id="playCam1Btn" type="button" disabled>Play Cam 1</button>
+              <button id="clearLogBtn" class="ghost" type="button">Clear Log</button>
+            </div>
+            <div id="captureStatus" class="capture-status">No captured H.264 checked yet.</div>
+          </div>
+          <pre id="tokenOutput" class="output"></pre>
+          <pre id="playbackLog" class="output playback-log"></pre>
+          <div class="manual">
+            <label>
+              Optional direct stream URL
+              <input id="manualStream" placeholder="rtsp:// or http(s):// stream URL" />
+            </label>
+            <button id="manualBtn" type="button">Open Stream URL</button>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
