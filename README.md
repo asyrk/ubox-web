@@ -85,6 +85,97 @@ flowchart LR
   Backend -->|"SSE diagnostics"| Browser
 ```
 
+## Network Layer Architecture
+
+Live video is not fetched from a normal URL. The backend builds the same kind of
+relay session the Android app appears to build.
+
+Transport stack:
+
+```text
+UDP socket
+  -> UBox P4P packet wrapper
+      -> relay/session messages
+      -> KCP packets in 0x1409 / 0x140a messages
+          -> UBox inner stream records
+              -> Annex B H.264 frames
+                  -> browser WebCodecs canvas playback
+```
+
+### P4P
+
+`P4P` is the project name for the proprietary UBox outer packet/session layer.
+The name comes from symbols found in the Android native libraries, such as
+`p4p_client_send_rlystreamreq`, `p4p_client_handle_kcp`, and
+`Java_com_ubia_p4p_UBICAPIs_*`.
+
+P4P handles:
+
+- packet header and light byte obfuscation
+- discovery/query packets
+- relay wake-up
+- relay stream open
+- session IDs (`sid`, `remoteSid`, `videoSid`)
+- keepalive
+- start-video control
+- carrying KCP bytes
+
+P4P packet header shape:
+
+```text
+magic, version, length, sid/channel, msg, msgLen, seqOrParam, kind, flag
+```
+
+Important P4P message IDs:
+
+```text
+0x1051 query request
+0x1201 relay wake-up request
+0x1202 relay wake-up response
+0x1205 relay stream request
+0x1206 relay stream response
+0x1405 keepalive
+0x1407 start-video control
+0x1409 KCP client packet
+0x140a KCP device packet
+```
+
+### KCP
+
+KCP is the reliable ordered transport running inside the P4P relay session. The
+native library exports `ikcp_*` symbols and KCP constants, and the observed
+packet shape matches the original [skywind3000/kcp](https://github.com/skywind3000/kcp)
+segment header:
+
+```text
+conv, cmd, frg, wnd, ts, sn, una, len, data
+```
+
+The backend uses `kcpjs` for this layer. Incoming `0x1409` / `0x140a` payloads
+are fed into KCP; KCP output is wrapped back into P4P `0x1409` packets.
+
+KCP does not wake the camera or open the relay. It only reassembles the ordered
+stream once P4P has established the relay path.
+
+### Stream Output
+
+After KCP messages are drained, the backend extracts UBox inner stream records,
+finds H.264 Annex B frame payloads, and exposes them to the browser as:
+
+```text
+GET /api/stream/live.h264?track=primary
+GET /api/stream/live.h264?track=secondary
+```
+
+Each browser stream is length-prefixed:
+
+```text
+uint32be frameLength
+Annex B H.264 frame bytes
+```
+
+The frontend decodes those frames with WebCodecs and draws to `<canvas>`.
+
 ## Project Layout
 
 ```text
@@ -97,7 +188,12 @@ src/lib/app/               Svelte screen and panel components
 src/lib/livePlayback.js    Browser WebCodecs playback controller
 src/lib/streamMetrics.js   Diagnostics chart bucketing
 src/lib/api.js             Frontend API helpers
+docs/network-layer.md      Camera wake-up and stream transport notes
+docs/reverse-engineering.md Native-library reverse-engineering workflow
 ```
+
+For current relay/KCP wake-up logic, see [docs/network-layer.md](docs/network-layer.md).
+For native-library analysis workflow, see [docs/reverse-engineering.md](docs/reverse-engineering.md).
 
 ## Requirements
 
