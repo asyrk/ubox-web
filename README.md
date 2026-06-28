@@ -192,10 +192,25 @@ src/lib/streamMetrics.js   Diagnostics chart bucketing
 src/lib/api.js             Frontend API helpers
 docs/network-layer.md      Camera wake-up and stream transport notes
 docs/reverse-engineering.md Native-library reverse-engineering workflow
+docs/native-xrefs.md       Native constant/function cross-references
+docs/native-start.md       Native p4p_client_start/startvideo lifecycle
+docs/native-control-callbacks.md Native AV/IO control and video callback flow
+docs/native-porting-plan.md Native behavior to mirror in the Node transport
+docs/native-stream-start-comparison.md Ghidra export comparison for stream/start
+docs/native-structs.md     Inferred native structs and field offsets
+docs/native-structs.h      C-style struct sketch for the native transport
+docs/native-timers.md      Native timer, retry, and live-count behavior
 ```
 
 For current relay/KCP wake-up logic, see [docs/network-layer.md](docs/network-layer.md).
 For native-library analysis workflow, see [docs/reverse-engineering.md](docs/reverse-engineering.md).
+For exact native message constants and payload offsets, see [docs/native-xrefs.md](docs/native-xrefs.md).
+For native startup/session setup, see [docs/native-start.md](docs/native-start.md).
+For native AV/IO control and callback flow, see [docs/native-control-callbacks.md](docs/native-control-callbacks.md).
+For the native-to-Node porting checklist, see [docs/native-porting-plan.md](docs/native-porting-plan.md).
+For Ghidra-exported stream/start comparison, see [docs/native-stream-start-comparison.md](docs/native-stream-start-comparison.md).
+For inferred native structs, see [docs/native-structs.md](docs/native-structs.md).
+For native retry and live-count behavior, see [docs/native-timers.md](docs/native-timers.md).
 
 ## Requirements
 

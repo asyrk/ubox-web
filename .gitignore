@@ -5,3 +5,4 @@ live-dumps/
 live-session-logs/
 node_modules/
 dist/
+docs/decompiled

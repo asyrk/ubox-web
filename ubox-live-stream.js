@@ -25,6 +25,9 @@ const RELAY_SERVERS = [
 const DEFAULT_STREAM_OPTIONS = {
   enableStartVideoControl: true,
   enableRdtAck: true,
+  enableGracefulStop: true,
+  enableNativeSessionFields: false,
+  requireWakeupReadyStatus: true,
   kcpSkipAfterMs: 2500,
   kcpSkipThrottleMs: 1500,
   relayRenewAfterMs: 15000,
@@ -34,6 +37,9 @@ const DEFAULT_STREAM_OPTIONS = {
   rdtAckIntervalMs: 25,
   rdtAckMinIntervalMs: 20,
   sessionSnapshotMs: 2000,
+  nativeKcpUpdateMs: 10,
+  keepaliveMissLimit: 13,
+  logoutGraceMs: 350,
 };
 
 function nowIso() {
@@ -206,6 +212,10 @@ function framePacket(frame) {
   return Buffer.concat([header, frame]);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function align4(value) {
   return (value + 3) & ~3;
 }
@@ -263,6 +273,42 @@ function buildRdtAckPayload({ lastFrameSeq = 0, receivedFrameSeqs = new Set() } 
   payload.writeUInt16LE(0, 4);
   tlvs.copy(payload, 12);
   return payload;
+}
+
+function createStartConfig(identity) {
+  const config = Buffer.alloc(0x40);
+  config[0] = identity.deviceType & 0xff;
+  config[1] = 1;
+  config[2] = 0;
+  config[3] = 0;
+  config[4] = identity.channel & 0xff;
+  config[5] = identity.streamIndex & 0xff;
+  config[6] = 0;
+  config[7] = identity.zoneId & 0xff;
+  toFixedAsciiBuffer(identity.uid, 0x14).copy(config, 0x08);
+  toFixedAsciiBuffer(identity.loginId, 0x10).copy(config, 0x1c);
+  toFixedAsciiBuffer(identity.loginPwd || "admin", 0x14).copy(config, 0x2c);
+  return config;
+}
+
+function parseRdtBlock(record) {
+  if (!record || record.length < 0x18) return null;
+  const packetLen = record.readUInt16LE(2);
+  const payloadLen = Math.max(0, Math.min(record.length, packetLen || record.length) - 0x18);
+  return {
+    type: record[0],
+    flags: record[1],
+    packetLen,
+    blockSeq: record.readUInt16LE(4),
+    baseBlockSeq: record.readUInt16LE(6),
+    blockCount: record[8],
+    blocksInFrame: record[9],
+    frameNo: record.readUInt16LE(10),
+    frameId: record.readUInt16LE(12),
+    blockIndex: record[15],
+    fullFrameLen: record.readUInt32LE(16),
+    payload: record.subarray(0x18, 0x18 + payloadLen),
+  };
 }
 
 class UBoxLiveStreamManager {
@@ -485,7 +531,36 @@ class UBoxLiveStreamSession {
     this.remoteSid = 0;
     this.videoSid = 0;
     this.channel = identity.channel || 0;
+    this.startConfig = createStartConfig(identity);
+    this.sessionState = {
+      active: true,
+      state: 1,
+      role: 2,
+      queryKind: this.startConfig[7],
+      localSid: identity.videoSidSeed & 0xff,
+      peerSidByte: 0,
+      peerValue08: 0,
+      peerValue0a: 0,
+      randomId: this.randomId,
+      sessionIndex: 0,
+      seqByte: crypto.randomBytes(1)[0],
+      relayMode: 1,
+      liveMissCount: 0,
+      aliveSendCount: 0,
+      streamReqEnabled: this.startConfig[1],
+      streamFlag1: this.startConfig[2],
+      streamFlag2: this.startConfig[3],
+      avKind: this.startConfig[4],
+      reqByteE1: this.startConfig[5],
+      uid: this.startConfig.subarray(0x08, 0x1c),
+      sessionBlobF8: this.startConfig.subarray(0x1c, 0x2c),
+      sessionBlob108: this.startConfig.subarray(0x2c, 0x40),
+      clientStartSecond: Math.floor(Date.now() / 1000) >>> 0,
+    };
     this.relayEstablished = false;
+    this.stopping = false;
+    this.lastInboundAt = 0;
+    this.lastAliveAt = 0;
     this.lastH264At = 0;
     this.lastKcpInputAt = 0;
     this.lastKcpMessageAt = 0;
@@ -506,6 +581,7 @@ class UBoxLiveStreamSession {
       hasFrame: false,
       receivedFrameSeqs: new Set(),
     };
+    this.rdtFrames = new Map();
     this.muxer = new LiveMp4Muxer({ fps: Number(options.fps || 15) });
     this.mp4Clients = new Set();
     this.mp4Backlog = [];
@@ -530,9 +606,18 @@ class UBoxLiveStreamSession {
       kcpInputErrors: 0,
       kcpOutputPackets: 0,
       rdtAckPackets: 0,
+      rdtPackets: 0,
+      rdtFrames: 0,
+      rdtFrameDrops: 0,
       videoKicks: 0,
       relayRenews: 0,
+      alivePackets: 0,
+      knockPackets: 0,
+      knockAcks: 0,
+      logoutPackets: 0,
     };
+    this.punchTimer = null;
+    this.knockRetriesLeft = 0;
     this.startedAt = nowIso();
   }
 
@@ -546,6 +631,17 @@ class UBoxLiveStreamSession {
       remoteSid: this.remoteSid,
       videoSid: this.videoSid,
       channel: this.channel,
+      sessionState: {
+        state: this.sessionState.state,
+        localSid: this.sessionState.localSid,
+        peerSidByte: this.sessionState.peerSidByte,
+        peerValue08: this.sessionState.peerValue08,
+        peerValue0a: this.sessionState.peerValue0a,
+        seqByte: this.sessionState.seqByte,
+        relayMode: this.sessionState.relayMode,
+        liveMissCount: this.sessionState.liveMissCount,
+        aliveSendCount: this.sessionState.aliveSendCount,
+      },
       dumpFile: this.dumpFile,
       logFile: this.logFile,
       mp4Ready: Boolean(this.muxer.initSegment),
@@ -573,6 +669,12 @@ class UBoxLiveStreamSession {
             lastKcpInputAgoMs: this.lastKcpInputAt ? Date.now() - this.lastKcpInputAt : null,
             lastKcpMessageAgoMs: this.lastKcpMessageAt ? Date.now() - this.lastKcpMessageAt : null,
             lastH264AgoMs: this.lastH264At ? Date.now() - this.lastH264At : null,
+            mtu: this.kcp.mtu,
+            mss: this.kcp.mss,
+            sndWnd: this.kcp.snd_wnd,
+            rcvWnd: this.kcp.rcv_wnd,
+            interval: this.kcp.interval,
+            rxMinRto: this.kcp.rx_minrto,
           }
         : null,
       startedAt: this.startedAt,
@@ -610,7 +712,7 @@ class UBoxLiveStreamSession {
     this.manager.emit("session-started", this.summary());
     this.sendDiscovery();
     this.relayTimer = setInterval(() => this.sendRelayWakeup(), 1000);
-    this.aliveTimer = setInterval(() => this.sendAlive(), 1000);
+    this.aliveTimer = setInterval(() => this.keepaliveTick(), 1000);
     if (this.options.enableRdtAck) {
       this.rdtAckTimer = setInterval(() => this.sendRdtVideoAck("timer"), Number(this.options.rdtAckIntervalMs || 25));
     }
@@ -618,13 +720,16 @@ class UBoxLiveStreamSession {
       this.manager.emit("session-snapshot", this.summary());
     }, Number(this.options.sessionSnapshotMs || 2000));
     this.videoWatchdogTimer = setInterval(() => this.checkVideoWatchdog(), 2000);
-    this.kcpTimer = setInterval(() => this.updateKcp(), 20);
+    this.kcpTimer = setInterval(() => this.updateKcp(), Number(this.options.nativeKcpUpdateMs || 10));
   }
 
   async stop() {
+    if (this.stopping) return;
+    this.stopping = true;
     clearInterval(this.relayTimer);
     clearInterval(this.aliveTimer);
     clearInterval(this.rdtAckTimer);
+    clearInterval(this.punchTimer);
     clearInterval(this.snapshotTimer);
     clearInterval(this.videoWatchdogTimer);
     clearInterval(this.kcpTimer);
@@ -633,6 +738,11 @@ class UBoxLiveStreamSession {
     for (const state of this.h264Tracks.values()) {
       for (const client of state.clients) client.res.end();
       state.clients.clear();
+    }
+    if (this.options.enableGracefulStop) {
+      this.sendStopVideoControl("stop");
+      this.sendLogoutRequest("stop");
+      await sleep(Number(this.options.logoutGraceMs || 350));
     }
     await new Promise((resolve) => this.socket.close(resolve));
   }
@@ -690,21 +800,55 @@ class UBoxLiveStreamSession {
 
   send(address, port, clearPacket, encrypted = true) {
     const packet = encrypted ? encodeP4P(clearPacket) : clearPacket;
-    this.socket.send(packet, port, address);
+    try {
+      this.socket.send(packet, port, address);
+    } catch (error) {
+      this.manager.emit("udp-send-error", { to: `${address}:${port}`, message: error.message });
+    }
     this.counters.tx += 1;
+  }
+
+  resetLiveCount(reason) {
+    this.lastInboundAt = Date.now();
+    if (this.sessionState.liveMissCount !== 0) {
+      this.manager.emit("live-count-reset", { reason, previous: this.sessionState.liveMissCount });
+    }
+    this.sessionState.liveMissCount = 0;
+  }
+
+  keepaliveTick() {
+    if (!this.relayEstablished || !this.relayPeer) return;
+    this.sessionState.liveMissCount += 1;
+    const limit = Number(this.options.keepaliveMissLimit || 13);
+    if (this.sessionState.liveMissCount >= limit) {
+      this.manager.emit("keepalive-dead", {
+        misses: this.sessionState.liveMissCount,
+        limit,
+        lastInboundAgoMs: this.lastInboundAt ? Date.now() - this.lastInboundAt : null,
+      });
+      this.manager.restartSession(this, "keepalive-dead", { misses: this.sessionState.liveMissCount, limit });
+      return;
+    }
+    this.sendAlive();
   }
 
   sendDiscovery() {
     const payload = Buffer.alloc(44);
+    payload[0] = this.sessionState.queryKind & 0xff;
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 4);
     const packet = buildPacket({ msg: 0x1051, payload, msgLen: 0x28 });
     for (const host of DISCOVERY_SERVERS) this.send(host, 10240, packet, true);
-    this.manager.emit("p4p-query-sent", { uid: this.identity.uid, servers: DISCOVERY_SERVERS.length });
+    this.manager.emit("p4p-query-sent", { uid: this.identity.uid, queryKind: this.sessionState.queryKind, servers: DISCOVERY_SERVERS.length });
   }
 
   sendRelayWakeup() {
     if (this.relayEstablished) return;
+    if (this.relayPeer && this.sessionState.state >= 3) {
+      this.sendRelayStreamRequest(this.relayPeer.address, this.relayPeer.port, "timer");
+      return;
+    }
     if (!this.relayPendingSince) this.relayPendingSince = Date.now();
+    this.sessionState.state = Math.max(this.sessionState.state, 2);
     const payload = Buffer.alloc(44);
     payload[0] = 1;
     payload[1] = 1;
@@ -714,8 +858,49 @@ class UBoxLiveStreamSession {
     this.manager.emit("relay-wakeup-sent", { servers: RELAY_SERVERS.length });
   }
 
-  sendRelayStreamRequest(address, port) {
+  sendRelayStreamRequest(address, port, reason = "wakeup-rsp") {
     if (this.relayEstablished) return;
+    this.sessionState.state = 3;
+    const payload = this.options.enableNativeSessionFields ? this.buildRelayStreamRequestPayload() : this.buildLegacyRelayStreamRequestPayload();
+    const packet = buildPacket({ msg: 0x1205, payload, msgLen: 0x24 });
+    this.send(address, port, packet, true);
+    this.manager.emit("relay-stream-req-sent", {
+      reason,
+      to: `${address}:${port}`,
+      nativeFields: Boolean(this.options.enableNativeSessionFields),
+      loginIdPresent: Boolean(this.identity.loginId),
+      loginPwdPresent: Boolean(this.identity.loginPwd),
+      p4pDeviceType: this.identity.deviceType,
+      cloudDeviceType: this.identity.cloudDeviceType,
+      videoSidSeed: this.identity.videoSidSeed,
+      prefix: payload.subarray(0, 108).toString("hex"),
+    });
+  }
+
+  buildRelayStreamRequestPayload() {
+    const s = this.sessionState;
+    const payload = Buffer.alloc(0x6c);
+    payload[0x00] = 1;
+    payload[0x01] = s.relayMode & 0xff;
+    payload[0x03] = s.seqByte & 0xff;
+    // Preserve direct-server hints that helped earlier captures when native source fields are still unknown.
+    payload[0x0c] = 0x0a;
+    payload[0x0e] = 0x02;
+    payload[0x0f] = 0x0f;
+    s.uid.copy(payload, 0x18, 0, 0x14);
+    s.sessionBlob108.copy(payload, 0x2c, 0, 0x14);
+    payload[0x41] = s.avKind & 0xff;
+    payload[0x42] = s.localSid & 0xff;
+    payload.writeUInt32LE(s.randomId >>> 0, 0x48);
+    s.sessionBlobF8.copy(payload, 0x4c, 0, 0x10);
+    payload[0x5c] = s.streamReqEnabled ? 9 : 0;
+    payload[0x5e] = s.reqByteE1 & 0xff;
+    payload[0x5f] = (s.streamFlag1 ? 1 : 0) | (s.streamFlag2 ? 2 : 0);
+    payload.writeUInt32LE(s.clientStartSecond >>> 0, 0x64);
+    return payload;
+  }
+
+  buildLegacyRelayStreamRequestPayload() {
     const payload = Buffer.alloc(108);
     payload[0] = 1;
     payload[3] = this.identity.deviceType || 2;
@@ -731,35 +916,147 @@ class UBoxLiveStreamSession {
     payload[92] = 9;
     payload[95] = 1;
     payload.writeUInt32LE(this.identity.zoneId || 0, 100);
-    const packet = buildPacket({ msg: 0x1205, payload, msgLen: 0x24 });
-    this.send(address, port, packet, true);
-    this.manager.emit("relay-stream-req-sent", {
-      to: `${address}:${port}`,
-      loginIdPresent: Boolean(this.identity.loginId),
-      loginPwdPresent: Boolean(this.identity.loginPwd),
-      p4pDeviceType: this.identity.deviceType,
-      cloudDeviceType: this.identity.cloudDeviceType,
-      videoSidSeed: this.identity.videoSidSeed,
-      prefix: payload.subarray(0, 108).toString("hex"),
-    });
+    return payload;
   }
 
   sendAlive() {
     if (!this.relayPeer) return;
+    const s = this.sessionState;
+    const isLanState = s.state === 7 || s.state === 8;
     const payload = Buffer.alloc(20);
-    const aliveSid = Number.isFinite(this.videoSid) ? this.videoSid : this.sid;
-    payload[0] = aliveSid & 0xff;
+    payload[0] = s.localSid & 0xff;
     payload[1] = this.channel & 0xff;
-    payload.writeUInt32LE(this.randomId, 4);
+    payload.writeUInt16LE(s.peerValue08 & 0xffff, 2);
+    payload.writeUInt32LE(s.randomId >>> 0, 4);
+    payload.writeUInt16LE(s.localSid & 0xffff, 8);
+    payload.writeUInt32LE(s.randomId >>> 0, 12);
     const packet = buildPacket({
       msg: 0x1405,
       payload,
-      sidOrChannel: aliveSid & 0xffff,
-      msgLen: 0x24,
-      seqOrParam: this.remoteSid || this.channel,
+      sidOrChannel: s.localSid & 0xffff,
+      msgLen: isLanState ? 0x21 : 0x24,
+      seqOrParam: isLanState ? s.peerSidByte & 0xffff : s.peerValue0a & 0xffff,
       kind: this.channel & 0xff,
     });
     this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
+    this.sessionState.aliveSendCount += 1;
+    this.counters.alivePackets += 1;
+  }
+
+  sendKnock(reason = "knock") {
+    if (!this.relayPeer) return false;
+    const s = this.sessionState;
+    const payload = Buffer.alloc(0x44);
+
+    s.uid.copy(payload, 0x00, 0, 0x14);
+    s.sessionBlob108.copy(payload, 0x14, 0, 0x14);
+    payload[0x2a] = s.localSid & 0xff;
+    payload[0x2b] = s.peerSidByte & 0xff;
+    payload.writeUInt16LE(s.peerValue08 & 0xffff, 0x2c);
+    payload.writeUInt16LE(s.peerValue0a & 0xffff, 0x2e);
+    payload.writeUInt32LE(s.randomId >>> 0, 0x30);
+    s.sessionBlobF8.copy(payload, 0x34, 0, 0x10);
+
+    const packet = buildPacket({
+      msg: 0x130b,
+      payload,
+      msgLen: 0x21,
+      flag: s.seqByte & 0xff,
+    });
+    this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
+    this.counters.knockPackets += 1;
+    this.manager.emit("knock-sent", {
+      reason,
+      packets: this.counters.knockPackets,
+      to: `${this.relayPeer.address}:${this.relayPeer.port}`,
+      localSid: s.localSid,
+      peerSidByte: s.peerSidByte,
+      peerValue08: s.peerValue08,
+      peerValue0a: s.peerValue0a,
+      seqByte: s.seqByte,
+      prefix: payload.toString("hex"),
+    });
+    return true;
+  }
+
+  startPunchRetries() {
+    clearInterval(this.punchTimer);
+    this.knockRetriesLeft = 6;
+    this.punchTimer = setInterval(() => {
+      if (!this.relayEstablished || !this.relayPeer || this.sessionState.state !== 6) {
+        clearInterval(this.punchTimer);
+        this.punchTimer = null;
+        return;
+      }
+      if (this.knockRetriesLeft <= 0) {
+        this.sessionState.state = 5;
+        clearInterval(this.punchTimer);
+        this.punchTimer = null;
+        this.manager.emit("punch-retries-expired", { state: this.sessionState.state });
+        return;
+      }
+      this.knockRetriesLeft -= 1;
+      this.sendKnock("punch-timer");
+    }, 1000);
+  }
+
+  handleKnockResponse(payload, rinfo) {
+    const s = this.sessionState;
+    const status = payload.length >= 0x16 ? payload.readInt16LE(0x14) : null;
+    const avState = payload.length > 0x16 ? payload[0x16] : null;
+    const avKind = payload.length > 0x19 ? payload[0x19] : this.channel;
+    const localSid = payload.length > 0x1a ? payload[0x1a] : s.localSid;
+    const peerSidByte = payload.length > 0x1b ? payload[0x1b] : s.peerSidByte;
+    const peerValue08 = payload.length >= 0x1e ? payload.readUInt16LE(0x1c) : s.peerValue08;
+    const peerValue0a = payload.length >= 0x20 ? payload.readUInt16LE(0x1e) : s.peerValue0a;
+
+    if (payload.length > 0x1a) s.localSid = localSid & 0xff;
+    if (payload.length > 0x1b) s.peerSidByte = peerSidByte & 0xff;
+    if (payload.length >= 0x1e) s.peerValue08 = peerValue08 & 0xffff;
+    if (payload.length >= 0x20) s.peerValue0a = peerValue0a & 0xffff;
+    if (payload.length > 0x19) {
+      s.avKind = avKind & 0xff;
+      this.channel = s.avKind;
+    }
+    s.state = 7;
+    clearInterval(this.punchTimer);
+    this.punchTimer = null;
+    this.resetLiveCount("knock-rsp");
+    this.manager.emit("knock-rsp", {
+      from: `${rinfo.address}:${rinfo.port}`,
+      status,
+      avState,
+      localSid: s.localSid,
+      peerSidByte: s.peerSidByte,
+      peerValue08: s.peerValue08,
+      peerValue0a: s.peerValue0a,
+      seqByte: s.seqByte,
+      prefix: payload.subarray(0, 80).toString("hex"),
+    });
+    this.sendKnockAck(payload, rinfo, "knock-rsp");
+    this.sendAlive();
+  }
+
+  sendKnockAck(knockPayload, rinfo, reason = "knock-ack") {
+    const payload = Buffer.alloc(0x24);
+    if (knockPayload.length >= 0x20) knockPayload.copy(payload, 0x14, 0x14, 0x20);
+    payload.writeUInt32LE(this.sessionState.randomId >>> 0, 0x20);
+    const packet = buildPacket({
+      msg: 0x130d,
+      payload,
+      msgLen: 0x21,
+      flag: this.sessionState.seqByte & 0xff,
+    });
+    this.send(rinfo.address, rinfo.port, packet, true);
+    this.counters.knockAcks += 1;
+    this.manager.emit("knock-ack-sent", {
+      reason,
+      to: `${rinfo.address}:${rinfo.port}`,
+      packets: this.counters.knockAcks,
+      seqByte: this.sessionState.seqByte,
+      prefix: payload.toString("hex"),
+    });
+    return true;
   }
 
   checkVideoWatchdog() {
@@ -817,6 +1114,9 @@ class UBoxLiveStreamSession {
     });
     this.relayEstablished = false;
     this.relayPeer = null;
+    clearInterval(this.punchTimer);
+    this.punchTimer = null;
+    this.knockRetriesLeft = 0;
     this.relayPendingSince = Date.now();
     this.sid = 0;
     this.remoteSid = 0;
@@ -847,20 +1147,36 @@ class UBoxLiveStreamSession {
     payload[1] = 0;
     payload[2] = this.identity.streamIndex & 0xff;
     payload[3] = 1;
-    if (this.kcp) {
-      this.sendStartVideoKcp(payload, "control");
-      return;
-    }
+    if (this.kcp) return this.sendAvControlKcp(payload, "start-video");
+    this.sendAvControlDirect(payload, "start-video");
+  }
+
+  sendStopVideoControl(reason = "stop-video") {
+    if (!this.relayPeer || !this.remoteSid) return false;
+    const payload = Buffer.alloc(16);
+    payload[0] = 2;
+    payload[1] = 0;
+    payload[2] = this.identity.streamIndex & 0xff;
+    payload[3] = 1;
+    if (this.kcp) return this.sendAvControlKcp(payload, reason);
+    return this.sendAvControlDirect(payload, reason);
+  }
+
+  sendAvControlDirect(payload, reason) {
+    const s = this.sessionState;
+    const isLanState = s.state === 7 || s.state === 8;
     const packet = buildPacket({
       msg: 0x1407,
       payload,
-      sidOrChannel: this.sid & 0xffff,
-      msgLen: 0x24,
-      seqOrParam: this.remoteSid & 0xffff,
+      sidOrChannel: s.localSid & 0xffff,
+      msgLen: isLanState ? 0x21 : 0x24,
+      seqOrParam: isLanState ? s.peerSidByte & 0xffff : s.peerValue0a & 0xffff,
       kind: this.channel & 0xff,
     });
     this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
-    this.manager.emit("start-video-sent", {
+    this.manager.emit("avctrl-sent", {
+      reason,
+      command: payload[0],
       to: `${this.relayPeer.address}:${this.relayPeer.port}`,
       sid: this.sid,
       remoteSid: this.remoteSid,
@@ -868,9 +1184,10 @@ class UBoxLiveStreamSession {
       channel: this.channel,
       streamIndex: this.identity.streamIndex,
     });
+    return true;
   }
 
-  sendStartVideoKcp(payload, reason = "start") {
+  sendAvControlKcp(payload, reason = "avctrl") {
     if (!this.kcp) return false;
     const record = Buffer.alloc(16 + payload.length);
     record.writeUInt16LE(1, 0);
@@ -883,9 +1200,10 @@ class UBoxLiveStreamSession {
     payload.copy(record, 16);
     const ret = this.kcp.send(record);
     this.kcp.flush(false);
-    this.lastStartVideoKcpAt = Date.now();
-    this.manager.emit("start-video-kcp-sent", {
+    if (payload[0] === 9) this.lastStartVideoKcpAt = Date.now();
+    this.manager.emit("avctrl-kcp-sent", {
       reason,
+      command: payload[0],
       ret,
       bytes: record.length,
       sid: this.sid,
@@ -894,6 +1212,40 @@ class UBoxLiveStreamSession {
       streamIndex: this.identity.streamIndex,
     });
     return ret >= 0;
+  }
+
+  sendStartVideoKcp(payload, reason = "start") {
+    return this.sendAvControlKcp(payload, reason);
+  }
+
+  sendLogoutRequest(reason = "logout") {
+    if (!this.relayPeer || !this.sessionState.active) return false;
+    const s = this.sessionState;
+    const payload = Buffer.alloc(0x54);
+    payload[0] = 1;
+    payload.writeUInt16LE(s.peerValue08 & 0xffff, 0x40);
+    payload.writeUInt32LE(s.randomId >>> 0, 0x44);
+    const state = s.state;
+    const packet = buildPacket({
+      msg: state === 7 || state === 8 ? 0x1309 : 0x1207,
+      payload,
+      sidOrChannel: s.localSid & 0xffff,
+      msgLen: state === 7 || state === 8 ? 0x21 : 0x24,
+      seqOrParam: state === 7 || state === 8 ? s.peerSidByte & 0xffff : s.peerValue0a & 0xffff,
+      kind: this.channel & 0xff,
+    });
+    this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
+    this.counters.logoutPackets += 1;
+    this.manager.emit("logout-req-sent", {
+      reason,
+      msg: `0x${(state === 7 || state === 8 ? 0x1309 : 0x1207).toString(16)}`,
+      packets: this.counters.logoutPackets,
+      sid: this.sid,
+      remoteSid: this.remoteSid,
+      localSid: s.localSid,
+      peerValue0a: s.peerValue0a,
+    });
+    return true;
   }
 
   observeVideoRecord(record) {
@@ -914,15 +1266,16 @@ class UBoxLiveStreamSession {
   }
 
   sendRdtVideoAck(reason = "timer") {
-    if (!this.relayEstablished || !this.relayPeer || !this.sid || !this.remoteSid) return false;
+    if (!this.relayEstablished || !this.relayPeer) return false;
     if (!this.rdtAckState.hasFrame) return false;
     const payload = buildRdtAckPayload(this.rdtAckState);
+    const s = this.sessionState;
     const packet = buildPacket({
       msg: 0x1403,
       payload,
-      sidOrChannel: this.sid & 0xffff,
+      sidOrChannel: s.localSid & 0xffff,
       msgLen: 0x24,
-      seqOrParam: this.remoteSid & 0xffff,
+      seqOrParam: s.peerValue0a & 0xffff,
       kind: this.channel & 0xff,
     });
     this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
@@ -963,29 +1316,70 @@ class UBoxLiveStreamSession {
 
     if (header.msg === 0x1202) {
       if (this.relayEstablished) return;
+      const statusByte = payload.length > 0x28 ? payload[0x28] : null;
+      const responseCount = payload.length > 0 ? payload[0] : null;
+      this.manager.emit("relay-wakeup-rsp", {
+        from: `${rinfo.address}:${rinfo.port}`,
+        statusByte,
+        responseCount,
+        prefix: payload.subarray(0, Math.min(payload.length, 64)).toString("hex"),
+      });
+      if (this.sessionState.state !== 2) {
+        this.manager.emit("relay-wakeup-ignored", {
+          from: `${rinfo.address}:${rinfo.port}`,
+          statusByte,
+          state: this.sessionState.state,
+          reason: "native-state-not-waiting-for-wakeup",
+        });
+        return;
+      }
+      if (this.options.requireWakeupReadyStatus && statusByte !== null && statusByte !== 2) {
+        this.manager.emit("relay-wakeup-ignored", {
+          from: `${rinfo.address}:${rinfo.port}`,
+          statusByte,
+          reason: "native-status-not-ready",
+        });
+        return;
+      }
+      this.sessionState.state = 3;
+      this.resetLiveCount("relay-wakeup-rsp");
       this.relayPeer = { address: rinfo.address, port: rinfo.port };
-      this.sendRelayStreamRequest(rinfo.address, rinfo.port);
+      this.sendRelayStreamRequest(rinfo.address, rinfo.port, "wakeup-rsp");
     } else if (header.msg === 0x1206) {
       if (this.relayEstablished) return;
       this.relayPeer = { address: rinfo.address, port: rinfo.port };
-      this.videoSid = payload[54] || this.videoSid;
-      this.sid = payload.length > 55 ? payload[55] : this.sid;
-      this.remoteSid = payload.length >= 60 ? payload.readUInt16LE(58) : this.remoteSid;
-      this.channel = this.identity.channel || 0;
+      if (!this.applyRelayStreamResponse(payload)) return;
+      this.videoSid = this.sessionState.localSid;
+      this.sid = this.sessionState.peerSidByte;
+      this.remoteSid = this.sessionState.peerValue0a;
+      this.channel = this.sessionState.avKind || this.identity.channel || 0;
+      this.sessionState.state = 6;
       this.relayEstablished = true;
       this.relayPendingSince = null;
+      this.resetLiveCount("relay-stream-rsp");
       this.manager.emit("relay-stream-rsp", {
         sid: this.sid,
         remoteSid: this.remoteSid,
         videoSid: this.videoSid,
         channel: this.channel,
+        peerSidByte: this.sessionState.peerSidByte,
+        peerValue08: this.sessionState.peerValue08,
+        peerValue0a: this.sessionState.peerValue0a,
         prefix: payload.subarray(0, 80).toString("hex"),
       });
+      this.sendKnock("relay-stream-rsp");
+      this.startPunchRetries();
+      this.sendAlive();
       this.sendStartVideoControl();
+    } else if (header.msg === 0x130c) {
+      this.handleKnockResponse(payload, rinfo);
     } else if (header.msg === 0x1406 || header.msg === 0x140a) {
+      this.resetLiveCount(header.msg === 0x1406 ? "alive" : "kcp");
+      if (header.msg === 0x1406) this.lastAliveAt = Date.now();
       if (header.msg === 0x140a && header.sidOrChannel && header.sidOrChannel !== this.remoteSid) {
         const previous = this.remoteSid;
         this.remoteSid = header.sidOrChannel;
+        this.sessionState.peerValue0a = header.sidOrChannel;
         this.manager.emit("remote-sid-learned", { previous, remoteSid: this.remoteSid, msg: `0x${header.msg.toString(16)}` });
       }
       if (header.seqOrParam && header.seqOrParam !== this.videoSid) {
@@ -997,10 +1391,55 @@ class UBoxLiveStreamSession {
         const kcpBytes = clear.subarray(16, 16 + header.length);
         this.handleKcpDatagram(kcpBytes, header, rinfo);
       }
+    } else if (header.msg === 0x1404) {
+      this.resetLiveCount("rdt");
+      this.handleRdtDatagram(payload, header, rinfo);
     } else if (header.msg === 0x1409) {
+      this.resetLiveCount("kcp");
       const kcpBytes = clear.subarray(16, 16 + header.length);
       this.handleKcpDatagram(kcpBytes, header, rinfo);
+    } else if (header.msg === 0x1208) {
+      this.manager.emit("logout-rsp", { sidOrChannel: header.sidOrChannel, seqOrParam: header.seqOrParam, prefix: payload.subarray(0, 64).toString("hex") });
+      this.sessionState.active = false;
     }
+  }
+
+  applyRelayStreamResponse(payload) {
+    if (!payload || payload.length < 0x40) return false;
+    const recordOffset = 0x18;
+    const status = payload.readInt16LE(recordOffset);
+    const avKind = payload[recordOffset + 0x1d];
+    const sessionIndex = payload[recordOffset + 0x1e];
+    const peerSidByte = payload[recordOffset + 0x1f];
+    const peerValue08 = payload.readUInt16LE(recordOffset + 0x20);
+    const peerValue0a = payload.readUInt16LE(recordOffset + 0x22);
+    const randomId = payload.readUInt32LE(recordOffset + 0x24);
+    if (randomId !== this.randomId) {
+      this.manager.emit("relay-stream-rsp-ignored", {
+        reason: "native-random-id-mismatch",
+        status,
+        randomId,
+        expectedRandomId: this.randomId,
+        prefix: payload.subarray(0, 80).toString("hex"),
+      });
+      return false;
+    }
+    if (status !== 0) {
+      this.manager.emit("relay-stream-rsp-ignored", {
+        reason: "native-status-error",
+        status,
+        randomId,
+        prefix: payload.subarray(0, 80).toString("hex"),
+      });
+      return false;
+    }
+    this.sessionState.avKind = avKind;
+    this.sessionState.sessionIndex = sessionIndex;
+    this.sessionState.localSid = sessionIndex;
+    this.sessionState.peerSidByte = peerSidByte;
+    this.sessionState.peerValue08 = peerValue08;
+    this.sessionState.peerValue0a = peerValue0a;
+    return true;
   }
 
   handleKcpDatagram(kcpBytes, header, rinfo) {
@@ -1059,6 +1498,83 @@ class UBoxLiveStreamSession {
     }
   }
 
+  handleRdtDatagram(payload, header, rinfo) {
+    const block = parseRdtBlock(payload);
+    if (!block) {
+      this.manager.emit("rdt-unparsed", { from: `${rinfo.address}:${rinfo.port}`, bytes: payload.length, prefix: payload.subarray(0, 48).toString("hex") });
+      return;
+    }
+    this.counters.rdtPackets += 1;
+    this.rdtAckState.lastFrameSeq = block.blockSeq;
+    this.rdtAckState.hasFrame = true;
+    this.rdtAckState.receivedFrameSeqs.add(block.blockSeq);
+    if (this.rdtAckState.receivedFrameSeqs.size > 512) {
+      this.rdtAckState.receivedFrameSeqs = new Set([...this.rdtAckState.receivedFrameSeqs].slice(-256));
+    }
+
+    const key = `${block.frameId}:${block.frameNo}`;
+    let frame = this.rdtFrames.get(key);
+    if (!frame) {
+      frame = {
+        createdAt: Date.now(),
+        expectedBlocks: Math.max(1, block.blocksInFrame || block.blockCount || 1),
+        fullFrameLen: block.fullFrameLen,
+        blocks: new Map(),
+      };
+      this.rdtFrames.set(key, frame);
+    }
+    frame.blocks.set(block.blockIndex, Buffer.from(block.payload));
+
+    if (this.counters.rdtPackets <= 5 || this.counters.rdtPackets % 50 === 0) {
+      this.manager.emit("rdt-block", {
+        type: `0x${block.type.toString(16)}`,
+        flags: `0x${block.flags.toString(16)}`,
+        frameId: block.frameId,
+        frameNo: block.frameNo,
+        blockSeq: block.blockSeq,
+        blockIndex: block.blockIndex,
+        blocks: frame.blocks.size,
+        expectedBlocks: frame.expectedBlocks,
+      });
+    }
+
+    if (Date.now() - this.lastRdtAckAt >= Number(this.options.rdtAckMinIntervalMs || 20)) {
+      this.sendRdtVideoAck("rdt-block");
+    }
+
+    if (frame.blocks.size < frame.expectedBlocks) {
+      this.pruneRdtFrames();
+      return;
+    }
+
+    const parts = [];
+    for (let i = 0; i < frame.expectedBlocks; i += 1) {
+      const part = frame.blocks.get(i);
+      if (!part) return;
+      parts.push(part);
+    }
+    let data = Buffer.concat(parts);
+    if (frame.fullFrameLen > 0 && data.length > frame.fullFrameLen) data = data.subarray(0, frame.fullFrameLen);
+    this.rdtFrames.delete(key);
+    this.counters.rdtFrames += 1;
+    this.processVideoPayload(data, {
+      source: "rdt",
+      streamByte: header.kind,
+      frameSeq: block.frameNo,
+      frameMeta: { cam: block.type === 0x09 ? 1 : 0, timestamp: Date.now() >>> 0 },
+    });
+  }
+
+  pruneRdtFrames() {
+    const cutoff = Date.now() - 5000;
+    for (const [key, frame] of this.rdtFrames) {
+      if (frame.createdAt < cutoff) {
+        this.rdtFrames.delete(key);
+        this.counters.rdtFrameDrops += 1;
+      }
+    }
+  }
+
   resetKcp() {
     if (this.kcp) this.kcp.release();
     this.kcp = null;
@@ -1076,10 +1592,22 @@ class UBoxLiveStreamSession {
     }
     this.kcpConv = conv;
     this.kcp = new Kcp(conv, { session: this });
-    this.kcp.setNoDelay(1, 10, 0, 0);
-    this.kcp.setWndSize(128, 256);
+    this.kcp.setMtu(0x518);
+    this.kcp.setNoDelay(1, 10, 0, 1);
+    this.kcp.setWndSize(0x80, 0x200);
+    this.kcp.rx_minrto = 0x0c;
+    this.kcp.nocwnd = 0;
     this.kcp.setOutput((data, size) => this.sendKcpOutput(data, size));
-    this.manager.emit("kcp-created", { conv, sndWnd: this.kcp.snd_wnd, rcvWnd: this.kcp.rcv_wnd, mtu: this.kcp.mtu });
+    this.manager.emit("kcp-created", {
+      conv,
+      sndWnd: this.kcp.snd_wnd,
+      rcvWnd: this.kcp.rcv_wnd,
+      mtu: this.kcp.mtu,
+      mss: this.kcp.mss,
+      interval: this.kcp.interval,
+      rxMinRto: this.kcp.rx_minrto,
+      nocwnd: this.kcp.nocwnd,
+    });
     return true;
   }
 
@@ -1101,12 +1629,14 @@ class UBoxLiveStreamSession {
     if (!this.relayPeer || !size) return;
     const payload = Buffer.from(data.subarray(0, size));
     const header = this.lastKcpHeader;
+    const s = this.sessionState;
+    const isLanState = s.state === 7 || s.state === 8;
     const packet = buildPacket({
       msg: 0x1409,
       payload,
-      sidOrChannel: this.sid & 0xffff,
-      msgLen: 0x24,
-      seqOrParam: this.remoteSid || this.videoSid || header?.sidOrChannel || this.channel,
+      sidOrChannel: isLanState ? s.localSid & 0xffff : s.peerSidByte & 0xffff,
+      msgLen: isLanState ? 0x21 : 0x24,
+      seqOrParam: isLanState ? s.peerSidByte & 0xffff : s.peerValue0a & 0xffff,
       kind: this.channel & 0xff,
     });
     this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
@@ -1220,19 +1750,22 @@ class UBoxLiveStreamSession {
       prefix: record.payload.subarray(0, 16).toString("hex"),
     });
     if (isVideo) {
-      this.observeVideoRecord(record);
       this.counters.videoFrames += 1;
-      const annexB = extractAnnexB(record.payload);
-      if (annexB) {
-        fs.appendFileSync(this.dumpFile, annexB);
-        this.counters.annexBFrames += 1;
-        this.counters.bytesWritten += annexB.length;
-        const clean = cleanAnnexB(annexB);
-        if (clean) {
-          const track = record.frameMeta?.cam === 1 || record.streamByte === 4 ? "secondary" : "primary";
-          this.broadcastH264(clean, track);
-          if (track === "primary") this.broadcastMp4(clean);
-        }
+      this.processVideoPayload(record.payload, { source: "kcp", streamByte: record.streamByte, frameSeq: record.frameSeq, frameMeta: record.frameMeta });
+    }
+  }
+
+  processVideoPayload(payload, meta = {}) {
+    const annexB = extractAnnexB(payload);
+    if (annexB) {
+      fs.appendFileSync(this.dumpFile, annexB);
+      this.counters.annexBFrames += 1;
+      this.counters.bytesWritten += annexB.length;
+      const clean = cleanAnnexB(annexB);
+      if (clean) {
+        const track = meta.frameMeta?.cam === 1 || meta.streamByte === 4 ? "secondary" : "primary";
+        this.broadcastH264(clean, track);
+        if (track === "primary") this.broadcastMp4(clean);
       }
     }
   }
