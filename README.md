@@ -1,6 +1,6 @@
 # IMPORTANT
 
-This project was 100% vibecoded. I have not reviewed this code, nor did I code anything that you can see here. I needed a web viewer and asked the AI to do it - and after few days it came up with this. Use at your own risk, I take no responsibility for this project, I will not maintain it, I will not accept pull requests.
+This project was 100% vibecoded. I have not reviewed this code, nor did I code anything that you can see here. I needed a web viewer since there's nothing native, so I asked the AI to do it - and after few days it came up with this. Use at your own risk, I take no responsibility for anything this does, I will not maintain it, I will not accept pull requests.
 
 # UBox Web
 
@@ -31,6 +31,8 @@ Still experimental:
   behavior, so reconnect and loss handling may still need tuning.
 - WebCodecs is required for live playback. Use a Chromium-based browser.
 - The project is a local viewer, not a packaged desktop app yet.
+
+<img width="963" height="863" alt="image" src="https://github.com/user-attachments/assets/0da3c2c6-22b6-49d4-a162-a0eee0f869e0" />
 
 ## Why It Works This Way
 
