@@ -7,7 +7,7 @@
 
   export let selectedDevice;
   export let busy = false;
-  export let captureStatus;
+  export let streamRunning = false;
   export let cam0Canvas;
   export let cam1Canvas;
   export let diagnosticsOpen;
@@ -19,24 +19,25 @@
   export let byteChartData;
   export let chartXDomain;
   export let streamIndex = 0;
-  export let onChangeDevice;
   export let onStartLive;
   export let onStopLive;
-  export let onGetFeedToken;
   export let onSetStreamIndex;
   export let onToggleDiagnostics;
   export let onClearDiagnostics;
   export let onSetFrameWindow;
+
+  $: liveButtonLabel = streamRunning ? "Stop" : "Start";
+  $: liveButtonAction = streamRunning ? onStopLive : onStartLive;
 </script>
 
 <div class="stream-layout">
   <Card.Root>
-    <Card.Header class="panel-head">
+    <Card.Header class="panel-head stream-head">
       <div>
         <Card.Title>{selectedDevice?.name || "Camera"}</Card.Title>
         <Card.Description>{selectedDevice?.uid}</Card.Description>
       </div>
-      <Button variant="ghost" onclick={onChangeDevice}>Change Device</Button>
+      <StreamQualitySwitch {streamIndex} {busy} {onSetStreamIndex} />
     </Card.Header>
 
     <Card.Content>
@@ -46,14 +47,10 @@
       </div>
 
       <div class="stream-controls">
-        <StreamQualitySwitch {streamIndex} {busy} {onSetStreamIndex} />
         <div class="stream-actions">
-          <Button onclick={onStartLive} disabled={busy}>Start Live Stream</Button>
-          <Button variant="secondary" onclick={onStopLive} disabled={busy}>Stop Live Stream</Button>
-          <Button variant="ghost" onclick={onGetFeedToken}>Get Feed Token</Button>
+          <Button onclick={liveButtonAction} disabled={busy}>{liveButtonLabel}</Button>
         </div>
       </div>
-      <p class="capture-status">{captureStatus}</p>
     </Card.Content>
   </Card.Root>
 

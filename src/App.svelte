@@ -257,27 +257,6 @@
     clearCanvases();
   }
 
-  async function getFeedToken() {
-    if (!selectedDevice) return;
-    busy = true;
-    setStatus("Requesting live-feed token...");
-    try {
-      const reply = await api("/api/webrtc-token", {
-        method: "POST",
-        body: JSON.stringify({ uid: selectedDevice.uid }),
-      });
-      tokenOutput = JSON.stringify(reply, null, 2);
-      setStatus("Feed token acquired.", "success");
-      log("api", "token-acquired", { uid: selectedDevice.uid });
-    } catch (error) {
-      setStatus(error.message, "danger");
-      tokenOutput = JSON.stringify(error.data || { error: error.message }, null, 2);
-      log("api", "token-error", { message: error.message });
-    } finally {
-      busy = false;
-    }
-  }
-
   async function startLiveDecode({ forceRestart = false } = {}) {
     if (!selectedDevice) return;
     busy = true;
@@ -433,7 +412,7 @@
 </script>
 
 <main class="app-shell">
-  <AppHeader {screen} steps={STEPS} {status} {statusTone} onLogout={logout} />
+  <AppHeader {screen} steps={STEPS} {status} {statusTone} onLogout={logout} onChangeDevice={changeDevice} />
 
   {#if screen === STEPS.LOGIN}
     <LoginScreen
@@ -452,7 +431,7 @@
     <StreamScreen
       {selectedDevice}
       {busy}
-      {captureStatus}
+      streamRunning={liveServerActive}
       bind:cam0Canvas
       bind:cam1Canvas
       {diagnosticsOpen}
@@ -464,10 +443,8 @@
       {byteChartData}
       {chartXDomain}
       {streamIndex}
-      onChangeDevice={changeDevice}
       onStartLive={startLiveDecode}
       onStopLive={stopLiveDecode}
-      onGetFeedToken={getFeedToken}
       onSetStreamIndex={setStreamIndex}
       onToggleDiagnostics={() => (diagnosticsOpen = !diagnosticsOpen)}
       onClearDiagnostics={() => (playbackLog = [])}

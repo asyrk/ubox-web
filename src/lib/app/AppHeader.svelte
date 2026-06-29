@@ -7,6 +7,7 @@
   export let status;
   export let statusTone;
   export let onLogout;
+  export let onChangeDevice;
 
   $: title = screen === steps.LOGIN ? "Log In" : screen === steps.DEVICES ? "Select Device" : "Live Stream";
   $: statusVariant = statusTone === "danger" ? "destructive" : statusTone === "success" ? "default" : "secondary";
@@ -18,9 +19,14 @@
     <h1>{title}</h1>
   </div>
   <div class="topbar-actions">
-    <Badge variant={statusVariant}>{status}</Badge>
-    {#if screen !== steps.LOGIN}
+    {#if screen === steps.STREAM}
+      <Button variant="ghost" onclick={onChangeDevice}>Change Device</Button>
       <Button variant="ghost" onclick={onLogout}>Log Out</Button>
+    {:else}
+      <Badge variant={statusVariant}>{status}</Badge>
+      {#if screen !== steps.LOGIN}
+        <Button variant="ghost" onclick={onLogout}>Log Out</Button>
+      {/if}
     {/if}
   </div>
 </header>

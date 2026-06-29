@@ -174,6 +174,8 @@ body {
 
 .topbar-actions {
   gap: 10px;
+  justify-content: flex-end;
+  margin-left: auto;
 }
 
 .diagnostics-actions {
@@ -224,6 +226,10 @@ p {
 .panel-head {
   justify-content: space-between;
   gap: 16px;
+}
+
+.stream-head {
+  align-items: flex-start;
 }
 
 .device-list {
@@ -311,15 +317,12 @@ video,
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
   min-height: 38px;
   color: var(--foreground);
   font-size: 12px;
   font-weight: 800;
-}
-
-.capture-status {
-  margin-top: 10px;
-  font-size: 13px;
 }
 
 .frame-metrics {
@@ -422,6 +425,15 @@ video,
   .panel-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .stream-head {
+    align-items: flex-start;
+    flex-direction: row;
   }
 
   .login-grid,
