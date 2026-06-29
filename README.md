@@ -199,6 +199,7 @@ docs/native-start.md       Native p4p_client_start/startvideo lifecycle
 docs/native-control-callbacks.md Native AV/IO control and video callback flow
 docs/native-porting-plan.md Native behavior to mirror in the Node transport
 docs/native-stream-start-comparison.md Ghidra export comparison for stream/start
+docs/native-state-machine.md Native P4P client state graph and Node comparison
 docs/native-structs.md     Inferred native structs and field offsets
 docs/native-structs.h      C-style struct sketch for the native transport
 docs/native-timers.md      Native timer, retry, and live-count behavior
@@ -211,6 +212,7 @@ For native startup/session setup, see [docs/native-start.md](docs/native-start.m
 For native AV/IO control and callback flow, see [docs/native-control-callbacks.md](docs/native-control-callbacks.md).
 For the native-to-Node porting checklist, see [docs/native-porting-plan.md](docs/native-porting-plan.md).
 For Ghidra-exported stream/start comparison, see [docs/native-stream-start-comparison.md](docs/native-stream-start-comparison.md).
+For the native P4P client state machine, see [docs/native-state-machine.md](docs/native-state-machine.md).
 For inferred native structs, see [docs/native-structs.md](docs/native-structs.md).
 For native retry and live-count behavior, see [docs/native-timers.md](docs/native-timers.md).
 

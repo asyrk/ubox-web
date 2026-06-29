@@ -22,17 +22,26 @@ const RELAY_SERVERS = [
   "130.94.90.222",
 ];
 
+const NON_LAN_KNOCK_STATES = new Set([3, 5, 6]);
+const IGNORED_LAN_STREAM_MESSAGES = new Set([0x1301, 0x1302, 0x1303, 0x1304, 0x1307, 0x1308]);
+
 const DEFAULT_STREAM_OPTIONS = {
   enableStartVideoControl: true,
   enableRdtAck: true,
   enableGracefulStop: true,
   enableNativeSessionFields: false,
   requireWakeupReadyStatus: true,
+  queryRetryMs: 1000,
+  queryRetryAttempts: 10,
+  relayWakeupMs: 500,
+  relayWakeupAttempts: 20,
+  relayStreamReqMs: 1000,
+  relayStreamReqAttempts: 16,
   kcpSkipAfterMs: 2500,
   kcpSkipThrottleMs: 1500,
   relayRenewAfterMs: 15000,
   relayRenewThrottleMs: 10000,
-  relayReestablishTimeoutMs: 8000,
+  relayReestablishTimeoutMs: 12000,
   reuseStaleAfterMs: 10000,
   rdtAckIntervalMs: 25,
   rdtAckMinIntervalMs: 20,
@@ -54,6 +63,33 @@ function toFixedAsciiBuffer(value, length) {
   const out = Buffer.alloc(length);
   Buffer.from(String(value || ""), "ascii").copy(out, 0, 0, length);
   return out;
+}
+
+function readFixedAsciiBuffer(value) {
+  return value.toString("ascii").replace(/\0+$/g, "");
+}
+
+function ipv4FromLe(value) {
+  return [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff].join(".");
+}
+
+function normalizeUdpTarget(address, port) {
+  const numericPort = Number(port);
+  if (!address || !Number.isInteger(numericPort) || numericPort <= 0 || numericPort > 65535) return null;
+  const parts = String(address).split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  if (address === "0.0.0.0" || address === "255.255.255.255") return null;
+  return { address, port: numericPort };
+}
+
+function uniqueTargets(targets) {
+  const seen = new Set();
+  return targets.filter((target) => {
+    const key = `${target.address}:${target.port}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function firstValue(object, names) {
@@ -558,6 +594,8 @@ class UBoxLiveStreamSession {
       clientStartSecond: Math.floor(Date.now() / 1000) >>> 0,
     };
     this.relayEstablished = false;
+    this.relayPeer = null;
+    this.learnedVpgTarget = null;
     this.stopping = false;
     this.lastInboundAt = 0;
     this.lastAliveAt = 0;
@@ -566,7 +604,7 @@ class UBoxLiveStreamSession {
     this.lastKcpMessageAt = 0;
     this.lastVideoKickAt = 0;
     this.lastRelayRenewAt = 0;
-    this.relayPendingSince = Date.now();
+    this.relayPendingSince = null;
     this.kcp = null;
     this.kcpConv = null;
     this.lastKcpHeader = null;
@@ -593,6 +631,8 @@ class UBoxLiveStreamSession {
       rx: 0,
       tx: 0,
       decoded: 0,
+      queryPackets: 0,
+      relayWakePackets: 0,
       kcpSegments: 0,
       kcpMessages: 0,
       videoFrames: 0,
@@ -616,7 +656,12 @@ class UBoxLiveStreamSession {
       knockAcks: 0,
       logoutPackets: 0,
     };
+    this.queryTimer = null;
+    this.queryRetriesLeft = Number(this.options.queryRetryAttempts || 10);
     this.punchTimer = null;
+    this.relayTimer = null;
+    this.relayWakeRetriesLeft = 0;
+    this.relayStreamRetriesLeft = 0;
     this.knockRetriesLeft = 0;
     this.startedAt = nowIso();
   }
@@ -641,6 +686,9 @@ class UBoxLiveStreamSession {
         relayMode: this.sessionState.relayMode,
         liveMissCount: this.sessionState.liveMissCount,
         aliveSendCount: this.sessionState.aliveSendCount,
+        queryRetriesLeft: this.queryRetriesLeft,
+        relayWakeRetriesLeft: this.relayWakeRetriesLeft,
+        relayStreamRetriesLeft: this.relayStreamRetriesLeft,
       },
       dumpFile: this.dumpFile,
       logFile: this.logFile,
@@ -711,7 +759,7 @@ class UBoxLiveStreamSession {
     this.socket.on("error", (error) => this.manager.emit("udp-error", { message: error.message }));
     this.manager.emit("session-started", this.summary());
     this.sendDiscovery();
-    this.relayTimer = setInterval(() => this.sendRelayWakeup(), 1000);
+    this.queryTimer = setInterval(() => this.queryTick(), Number(this.options.queryRetryMs || 1000));
     this.aliveTimer = setInterval(() => this.keepaliveTick(), 1000);
     if (this.options.enableRdtAck) {
       this.rdtAckTimer = setInterval(() => this.sendRdtVideoAck("timer"), Number(this.options.rdtAckIntervalMs || 25));
@@ -726,6 +774,7 @@ class UBoxLiveStreamSession {
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
+    clearInterval(this.queryTimer);
     clearInterval(this.relayTimer);
     clearInterval(this.aliveTimer);
     clearInterval(this.rdtAckTimer);
@@ -833,29 +882,173 @@ class UBoxLiveStreamSession {
   }
 
   sendDiscovery() {
+    if (this.sessionState.state !== 1) {
+      this.manager.emit("p4p-query-skipped", { state: this.sessionState.state, reason: "native-state-not-query" });
+      return false;
+    }
     const payload = Buffer.alloc(44);
     payload[0] = this.sessionState.queryKind & 0xff;
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 4);
     const packet = buildPacket({ msg: 0x1051, payload, msgLen: 0x28 });
     for (const host of DISCOVERY_SERVERS) this.send(host, 10240, packet, true);
-    this.manager.emit("p4p-query-sent", { uid: this.identity.uid, queryKind: this.sessionState.queryKind, servers: DISCOVERY_SERVERS.length });
+    this.counters.queryPackets += 1;
+    this.manager.emit("p4p-query-sent", {
+      uid: this.identity.uid,
+      queryKind: this.sessionState.queryKind,
+      servers: DISCOVERY_SERVERS.length,
+      packets: this.counters.queryPackets,
+    });
+    return true;
   }
 
-  sendRelayWakeup() {
+  queryTick() {
+    if (this.sessionState.state !== 1) {
+      clearInterval(this.queryTimer);
+      this.queryTimer = null;
+      return;
+    }
+    if (this.queryRetriesLeft <= 0) {
+      clearInterval(this.queryTimer);
+      this.queryTimer = null;
+      this.manager.emit("p4p-query-timeout", {
+        packets: this.counters.queryPackets,
+        state: this.sessionState.state,
+      });
+      this.manager.restartSession(this, "p4p-query-timeout", { packets: this.counters.queryPackets });
+      return;
+    }
+    this.queryRetriesLeft -= 1;
+    this.sendDiscovery();
+  }
+
+  beginRelayWakeup(reason, rinfo = null, query = {}) {
+    if (this.sessionState.state !== 1 && this.sessionState.state !== 2) {
+      this.manager.emit("relay-wakeup-phase-skipped", {
+        reason,
+        state: this.sessionState.state,
+      });
+      return false;
+    }
+    clearInterval(this.queryTimer);
+    this.queryTimer = null;
+    this.sessionState.state = 2;
+    this.relayPendingSince = Date.now();
+    const learnedTarget = normalizeUdpTarget(query.vpgIp, query.vpgPort);
+    if (learnedTarget) this.learnedVpgTarget = learnedTarget;
+    this.relayWakeRetriesLeft = Number(this.options.relayWakeupAttempts || 20);
+    if (!this.relayTimer) {
+      this.relayTimer = setInterval(() => this.relayWakeupTick(), Number(this.options.relayWakeupMs || 500));
+    }
+    this.manager.emit("relay-wakeup-phase-started", {
+      reason,
+      from: rinfo ? `${rinfo.address}:${rinfo.port}` : undefined,
+      status: query.status,
+      vpgIp: query.vpgIp,
+      vpgPort: query.vpgPort,
+      learnedVpgTarget: this.learnedVpgTarget ? `${this.learnedVpgTarget.address}:${this.learnedVpgTarget.port}` : null,
+      state: this.sessionState.state,
+      intervalMs: Number(this.options.relayWakeupMs || 500),
+      attempts: this.relayWakeRetriesLeft,
+    });
+    this.sendRelayWakeup(reason);
+    return true;
+  }
+
+  relayWakeupTick() {
     if (this.relayEstablished) return;
-    if (this.relayPeer && this.sessionState.state >= 3) {
-      this.sendRelayStreamRequest(this.relayPeer.address, this.relayPeer.port, "timer");
+    if (this.sessionState.state !== 2) {
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
+      return;
+    }
+    if (this.relayWakeRetriesLeft <= 0) {
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
+      this.manager.emit("relay-wakeup-timeout", {
+        state: this.sessionState.state,
+        packets: this.counters.relayWakePackets,
+      });
+      this.manager.restartSession(this, "relay-wakeup-timeout", { packets: this.counters.relayWakePackets });
+      return;
+    }
+    this.relayWakeRetriesLeft -= 1;
+    this.sendRelayWakeup("timer");
+  }
+
+  beginRelayStreamRequest(address, port, reason = "wakeup-rsp") {
+    clearInterval(this.relayTimer);
+    this.relayTimer = null;
+    this.relayPeer = { address, port };
+    this.sessionState.state = 3;
+    this.relayStreamRetriesLeft = Number(this.options.relayStreamReqAttempts || 16);
+    this.relayTimer = setInterval(() => this.relayStreamRequestTick(), Number(this.options.relayStreamReqMs || 1000));
+    this.manager.emit("relay-stream-phase-started", {
+      reason,
+      to: `${address}:${port}`,
+      state: this.sessionState.state,
+      intervalMs: Number(this.options.relayStreamReqMs || 1000),
+      attempts: this.relayStreamRetriesLeft,
+    });
+    this.sendRelayStreamRequest(address, port, reason);
+  }
+
+  relayStreamRequestTick() {
+    if (this.relayEstablished) {
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
+      return;
+    }
+    if (!this.relayPeer || this.sessionState.state !== 3) {
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
+      return;
+    }
+    if (this.relayStreamRetriesLeft <= 0) {
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
+      this.manager.emit("relay-stream-req-timeout", {
+        state: this.sessionState.state,
+        to: `${this.relayPeer.address}:${this.relayPeer.port}`,
+      });
+      this.manager.restartSession(this, "relay-stream-req-timeout");
+      return;
+    }
+    this.relayStreamRetriesLeft -= 1;
+    this.sendRelayStreamRequest(this.relayPeer.address, this.relayPeer.port, "timer");
+  }
+
+  relayWakeupTargets() {
+    return uniqueTargets([
+      ...(this.learnedVpgTarget ? [{ ...this.learnedVpgTarget, source: "query-rsp" }] : []),
+      ...RELAY_SERVERS.map((address) => ({ address, port: 20001, source: "static" })),
+    ]);
+  }
+
+  sendRelayWakeup(reason = "timer") {
+    if (this.relayEstablished) return;
+    if (this.sessionState.state !== 2) {
+      this.manager.emit("relay-wakeup-skipped", {
+        state: this.sessionState.state,
+        reason: "native-state-not-wakeup",
+      });
       return;
     }
     if (!this.relayPendingSince) this.relayPendingSince = Date.now();
-    this.sessionState.state = Math.max(this.sessionState.state, 2);
     const payload = Buffer.alloc(44);
     payload[0] = 1;
     payload[1] = 1;
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 4);
     const packet = buildPacket({ msg: 0x1201, payload, msgLen: 0x24 });
-    for (const host of RELAY_SERVERS) this.send(host, 20001, packet, true);
-    this.manager.emit("relay-wakeup-sent", { servers: RELAY_SERVERS.length });
+    const targets = this.relayWakeupTargets();
+    for (const target of targets) this.send(target.address, target.port, packet, true);
+    this.counters.relayWakePackets += 1;
+    this.manager.emit("relay-wakeup-sent", {
+      reason,
+      servers: targets.length,
+      learnedVpgTarget: this.learnedVpgTarget ? `${this.learnedVpgTarget.address}:${this.learnedVpgTarget.port}` : null,
+      packets: this.counters.relayWakePackets,
+      retriesLeft: this.relayWakeRetriesLeft,
+    });
   }
 
   sendRelayStreamRequest(address, port, reason = "wakeup-rsp") {
@@ -943,8 +1136,9 @@ class UBoxLiveStreamSession {
     this.counters.alivePackets += 1;
   }
 
-  sendKnock(reason = "knock") {
-    if (!this.relayPeer) return false;
+  sendKnock(reason = "knock", destination = null) {
+    const target = destination || this.relayPeer;
+    if (!target) return false;
     const s = this.sessionState;
     const payload = Buffer.alloc(0x44);
 
@@ -963,12 +1157,12 @@ class UBoxLiveStreamSession {
       msgLen: 0x21,
       flag: s.seqByte & 0xff,
     });
-    this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
+    this.send(target.address, target.port, packet, true);
     this.counters.knockPackets += 1;
     this.manager.emit("knock-sent", {
       reason,
       packets: this.counters.knockPackets,
-      to: `${this.relayPeer.address}:${this.relayPeer.port}`,
+      to: `${target.address}:${target.port}`,
       localSid: s.localSid,
       peerSidByte: s.peerSidByte,
       peerValue08: s.peerValue08,
@@ -1010,6 +1204,18 @@ class UBoxLiveStreamSession {
     const peerValue08 = payload.length >= 0x1e ? payload.readUInt16LE(0x1c) : s.peerValue08;
     const peerValue0a = payload.length >= 0x20 ? payload.readUInt16LE(0x1e) : s.peerValue0a;
 
+    if (!NON_LAN_KNOCK_STATES.has(s.state)) {
+      this.manager.emit("knock-rsp-ignored", {
+        from: `${rinfo.address}:${rinfo.port}`,
+        state: s.state,
+        status,
+        avState,
+        reason: "native-state-not-punchable-non-lan",
+        prefix: payload.subarray(0, 80).toString("hex"),
+      });
+      return;
+    }
+
     if (payload.length > 0x1a) s.localSid = localSid & 0xff;
     if (payload.length > 0x1b) s.peerSidByte = peerSidByte & 0xff;
     if (payload.length >= 0x1e) s.peerValue08 = peerValue08 & 0xffff;
@@ -1018,12 +1224,23 @@ class UBoxLiveStreamSession {
       s.avKind = avKind & 0xff;
       this.channel = s.avKind;
     }
+    const previousPeer = this.relayPeer ? `${this.relayPeer.address}:${this.relayPeer.port}` : null;
+    this.relayPeer = { address: rinfo.address, port: rinfo.port };
+    this.videoSid = s.localSid;
+    this.sid = s.peerSidByte;
+    this.remoteSid = s.peerValue0a;
     s.state = 7;
+    this.relayEstablished = true;
+    this.relayPendingSince = null;
+    clearInterval(this.relayTimer);
+    this.relayTimer = null;
     clearInterval(this.punchTimer);
     this.punchTimer = null;
     this.resetLiveCount("knock-rsp");
     this.manager.emit("knock-rsp", {
       from: `${rinfo.address}:${rinfo.port}`,
+      previousPeer,
+      activePeer: `${this.relayPeer.address}:${this.relayPeer.port}`,
       status,
       avState,
       localSid: s.localSid,
@@ -1035,6 +1252,28 @@ class UBoxLiveStreamSession {
     });
     this.sendKnockAck(payload, rinfo, "knock-rsp");
     this.sendAlive();
+  }
+
+  handlePeerKnock(payload, rinfo) {
+    const state = this.sessionState.state;
+    const from = `${rinfo.address}:${rinfo.port}`;
+    if (!NON_LAN_KNOCK_STATES.has(state)) {
+      this.manager.emit("knock-peer-ignored", {
+        from,
+        state,
+        reason: "native-state-not-punchable-non-lan",
+        prefix: payload.subarray(0, 80).toString("hex"),
+      });
+      return;
+    }
+    this.manager.emit("knock-peer", {
+      from,
+      state,
+      prefix: payload.subarray(0, 80).toString("hex"),
+    });
+    if (!this.sendKnock("knock-peer", { address: rinfo.address, port: rinfo.port })) {
+      this.manager.emit("knock-peer-reply-skipped", { from, state, reason: "knock-build-failed" });
+    }
   }
 
   sendKnockAck(knockPayload, rinfo, reason = "knock-ack") {
@@ -1114,10 +1353,19 @@ class UBoxLiveStreamSession {
     });
     this.relayEstablished = false;
     this.relayPeer = null;
+    this.learnedVpgTarget = null;
+    clearInterval(this.queryTimer);
+    this.queryTimer = null;
+    clearInterval(this.relayTimer);
+    this.relayTimer = null;
     clearInterval(this.punchTimer);
     this.punchTimer = null;
+    this.queryRetriesLeft = Number(this.options.queryRetryAttempts || 10);
+    this.relayWakeRetriesLeft = 0;
+    this.relayStreamRetriesLeft = 0;
     this.knockRetriesLeft = 0;
-    this.relayPendingSince = Date.now();
+    this.relayPendingSince = null;
+    this.sessionState.state = 1;
     this.sid = 0;
     this.remoteSid = 0;
     this.videoSid = 0;
@@ -1126,7 +1374,8 @@ class UBoxLiveStreamSession {
     this.kcpReceivedSns = new Set();
     this.lastKcpSkipAt = 0;
     this.lastStartVideoKcpAt = 0;
-    this.sendRelayWakeup();
+    this.sendDiscovery();
+    this.queryTimer = setInterval(() => this.queryTick(), Number(this.options.queryRetryMs || 1000));
   }
 
   sendStartVideoControl() {
@@ -1294,6 +1543,44 @@ class UBoxLiveStreamSession {
     return true;
   }
 
+  handleQueryResponse(payload, rinfo) {
+    const status = payload.length >= 2 ? payload.readInt16LE(0) : null;
+    const uid = payload.length >= 0x18 ? readFixedAsciiBuffer(payload.subarray(4, 0x18)) : "";
+    const vpgIpRaw = payload.length >= 0x1c ? payload.readUInt32LE(0x18) : null;
+    const vpgPort = payload.length >= 0x1e ? payload.readUInt16LE(0x1c) : null;
+    const query = {
+      from: `${rinfo.address}:${rinfo.port}`,
+      status,
+      uid,
+      vpgIp: vpgIpRaw === null ? null : ipv4FromLe(vpgIpRaw),
+      vpgPort,
+      state: this.sessionState.state,
+      prefix: payload.subarray(0, Math.min(payload.length, 64)).toString("hex"),
+    };
+    this.manager.emit("p4p-query-rsp", query);
+
+    if (status === -0x7d1) {
+      this.manager.emit("p4p-query-rsp-error", { ...query, reason: "native-query-error" });
+      this.manager.restartSession(this, "p4p-query-rsp-error", { status });
+      return;
+    }
+
+    if (this.sessionState.state === 1) {
+      this.beginRelayWakeup("query-rsp", rinfo, query);
+      return;
+    }
+
+    if (this.sessionState.state === 2) {
+      this.sendRelayWakeup("query-rsp-repeat");
+      return;
+    }
+
+    this.manager.emit("p4p-query-rsp-ignored", {
+      ...query,
+      reason: "native-state-not-query-or-wakeup",
+    });
+  }
+
   handleDatagram(raw, rinfo) {
     this.counters.rx += 1;
     const decoded = decodeDatagram(raw);
@@ -1312,9 +1599,15 @@ class UBoxLiveStreamSession {
       len: header.length,
       msgLen: header.msgLen,
       sidOrChannel: header.sidOrChannel,
+      seqOrParam: header.seqOrParam,
+      kind: header.kind,
+      flag: header.flag,
+      state: this.sessionState.state,
     });
 
-    if (header.msg === 0x1202) {
+    if (header.msg === 0x1052) {
+      this.handleQueryResponse(payload, rinfo);
+    } else if (header.msg === 0x1202) {
       if (this.relayEstablished) return;
       const statusByte = payload.length > 0x28 ? payload[0x28] : null;
       const responseCount = payload.length > 0 ? payload[0] : null;
@@ -1341,14 +1634,14 @@ class UBoxLiveStreamSession {
         });
         return;
       }
-      this.sessionState.state = 3;
       this.resetLiveCount("relay-wakeup-rsp");
-      this.relayPeer = { address: rinfo.address, port: rinfo.port };
-      this.sendRelayStreamRequest(rinfo.address, rinfo.port, "wakeup-rsp");
+      this.beginRelayStreamRequest(rinfo.address, rinfo.port, "wakeup-rsp");
     } else if (header.msg === 0x1206) {
       if (this.relayEstablished) return;
       this.relayPeer = { address: rinfo.address, port: rinfo.port };
       if (!this.applyRelayStreamResponse(payload)) return;
+      clearInterval(this.relayTimer);
+      this.relayTimer = null;
       this.videoSid = this.sessionState.localSid;
       this.sid = this.sessionState.peerSidByte;
       this.remoteSid = this.sessionState.peerValue0a;
@@ -1373,6 +1666,17 @@ class UBoxLiveStreamSession {
       this.sendStartVideoControl();
     } else if (header.msg === 0x130c) {
       this.handleKnockResponse(payload, rinfo);
+    } else if (header.msg === 0x130e) {
+      this.handlePeerKnock(payload, rinfo);
+    } else if (IGNORED_LAN_STREAM_MESSAGES.has(header.msg)) {
+      this.manager.emit("lan-message-ignored", {
+        from: `${rinfo.address}:${rinfo.port}`,
+        msg: `0x${header.msg.toString(16)}`,
+        name: describeMsg(header.msg),
+        state: this.sessionState.state,
+        reason: "lan-state-machine-disabled",
+        prefix: payload.subarray(0, Math.min(payload.length, 80)).toString("hex"),
+      });
     } else if (header.msg === 0x1406 || header.msg === 0x140a) {
       this.resetLiveCount(header.msg === 0x1406 ? "alive" : "kcp");
       if (header.msg === 0x1406) this.lastAliveAt = Date.now();

@@ -13,6 +13,8 @@
     trimSamples,
   } from "./lib/streamMetrics.js";
 
+  const MAX_DIAGNOSTIC_LINES = 1000;
+
   const STEPS = {
     LOGIN: "login",
     DEVICES: "devices",
@@ -64,7 +66,7 @@
       event,
       ...detail,
     };
-    playbackLog = [...playbackLog, JSON.stringify(row)].slice(-180);
+    playbackLog = [...playbackLog, JSON.stringify(row)].slice(-MAX_DIAGNOSTIC_LINES);
   }
 
   function recordReceivedFrame(track) {
@@ -105,13 +107,12 @@
 
   function connectStreamEvents() {
     if (streamEvents) return;
-    const noisyEvents = new Set(["p4p-packet", "kcp-segment", "kcp-ack-sent", "inner-record"]);
     streamEvents = new EventSource("/api/stream/events");
 
     streamEvents.addEventListener("log", (event) => {
       try {
         const detail = JSON.parse(event.data);
-        if (!noisyEvents.has(detail.event)) log("stream", detail.event || "event", detail);
+        log("stream", detail.event || "event", detail);
         if (detail.event === "relay-stream-rsp") {
           captureStatus = `Relay stream opened: sid ${detail.sid}, channel ${detail.channel}.`;
         }
