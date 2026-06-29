@@ -100,6 +100,12 @@ function firstValue(object, names) {
   return "";
 }
 
+function normalizeStreamIndex(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(3, Math.trunc(n)));
+}
+
 function flattenObject(object, prefix = "", out = {}) {
   if (!object || typeof object !== "object" || Buffer.isBuffer(object)) return out;
   for (const [key, value] of Object.entries(object)) {
@@ -153,7 +159,10 @@ function getDeviceIdentity(device) {
       "info.device_user",
       "infos.device_user",
     ]),
-    streamIndex: Number(firstValue(flat, ["streamindex", "streamIndex", "stream_type", "raw.streamindex", "raw.stream_type"]) || 0),
+    streamIndex: normalizeStreamIndex(
+      firstValue(flat, ["streamindex", "streamIndex", "stream_type", "raw.streamindex", "raw.stream_type"]),
+      0,
+    ),
     zoneId: Number(firstValue(flat, ["zoneID", "zoneId", "zoneid", "zone_id", "raw.zoneID", "raw.zoneid", "raw.zone_id"]) || 0),
     channel: Number(firstValue(flat, ["channel", "raw.channel"]) || 0),
     cloudDeviceType,
@@ -495,14 +504,19 @@ class UBoxLiveStreamManager {
   async start(device, options = {}) {
     const sessionOptions = { ...this.defaultOptions, ...options };
     const identity = getDeviceIdentity(device);
+    if (sessionOptions.streamIndex !== undefined) {
+      identity.streamIndex = normalizeStreamIndex(sessionOptions.streamIndex, identity.streamIndex);
+    }
     if (!identity.uid) {
       const error = new Error("Selected device does not include a UID.");
       error.status = 400;
       throw error;
     }
+    const sameStreamIndex = this.session?.identity.streamIndex === identity.streamIndex;
     const reusable =
       this.session &&
       this.session.identity.uid === identity.uid &&
+      sameStreamIndex &&
       !sessionOptions.forceRestart &&
       !this.session.isStaleForReuse(sessionOptions);
     if (reusable) {
@@ -512,8 +526,9 @@ class UBoxLiveStreamManager {
     }
     if (this.session && this.session.identity.uid === identity.uid) {
       this.emit("session-restart", {
-        reason: sessionOptions.forceRestart ? "forced" : "stale-session",
+        reason: sessionOptions.forceRestart ? "forced" : sameStreamIndex ? "stale-session" : "stream-index-changed",
         previous: this.session.summary(),
+        nextStreamIndex: identity.streamIndex,
       });
     }
     await this.stop();
@@ -676,6 +691,7 @@ class UBoxLiveStreamSession {
       remoteSid: this.remoteSid,
       videoSid: this.videoSid,
       channel: this.channel,
+      streamIndex: this.identity.streamIndex,
       sessionState: {
         state: this.sessionState.state,
         localSid: this.sessionState.localSid,

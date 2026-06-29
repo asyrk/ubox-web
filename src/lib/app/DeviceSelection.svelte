@@ -1,7 +1,7 @@
 <script>
-  import Badge from "../ui/Badge.svelte";
-  import Button from "../ui/Button.svelte";
-  import Card from "../ui/Card.svelte";
+  import { Badge } from "$lib/components/ui/badge/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
 
   export let devices = [];
   export let busy = false;
@@ -9,23 +9,23 @@
   export let onSelect;
 </script>
 
-<Card>
-  <div class="panel-head">
+<Card.Root>
+  <Card.Header class="panel-head">
     <div>
-      <h2>Cameras</h2>
-      <p>{devices.length ? "Choose the device to open the stream view." : "No cameras returned by the UBox account."}</p>
+      <Card.Title>Cameras</Card.Title>
+      <Card.Description>{devices.length ? "Choose the device to open the stream view." : "No cameras returned by the UBox account."}</Card.Description>
     </div>
     <Button variant="secondary" disabled={busy} onclick={onRefresh}>Refresh</Button>
-  </div>
-  <div class="device-list">
+  </Card.Header>
+  <Card.Content class="device-list">
     {#each devices as device}
-      <button class="device-row" type="button" on:click={() => onSelect(device)}>
+      <Button class="device-row" variant="outline" type="button" onclick={() => onSelect(device)}>
         <span>
           <strong>{device.name || "Camera"}</strong>
           <small>{device.uid}</small>
         </span>
-        <Badge tone={device.owner ? "success" : "neutral"}>{device.owner ? "Owner" : "Shared"}</Badge>
-      </button>
+        <Badge variant={device.owner ? "default" : "secondary"}>{device.owner ? "Owner" : "Shared"}</Badge>
+      </Button>
     {/each}
-  </div>
-</Card>
+  </Card.Content>
+</Card.Root>

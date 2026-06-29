@@ -452,8 +452,16 @@ async function route(req, res) {
       await requireSession();
       const body = await readBody(req);
       if (!body.device && !body.uid) return json(res, 400, { error: "device or uid is required." });
-      const device = body.device || { uid: body.uid, ...body };
-      const status = await liveStreams.start(device, body.options || {});
+      const requestedStreamIndex = body.streamIndex ?? body.options?.streamIndex;
+      const device = {
+        ...(body.device || { uid: body.uid, ...body }),
+        ...(requestedStreamIndex !== undefined ? { streamIndex: requestedStreamIndex } : {}),
+      };
+      const options = {
+        ...(body.options || {}),
+        ...(requestedStreamIndex !== undefined ? { streamIndex: requestedStreamIndex } : {}),
+      };
+      const status = await liveStreams.start(device, options);
       return json(res, 200, status);
     }
 

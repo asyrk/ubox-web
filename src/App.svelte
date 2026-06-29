@@ -39,6 +39,7 @@
   let byteChartData = [];
   let streamEvents = null;
   let liveServerActive = false;
+  let streamIndex = 0;
 
   let account = "";
   let password = "";
@@ -49,6 +50,14 @@
 
   let cam0Canvas;
   let cam1Canvas;
+
+  function normalizeUiStreamIndex(value) {
+    return Number(value) === 1 ? 1 : 0;
+  }
+
+  function streamQualityLabel(value) {
+    return normalizeUiStreamIndex(value) === 1 ? "HD" : "SD";
+  }
 
   function setStatus(message, tone = "neutral") {
     status = message;
@@ -212,6 +221,7 @@
     screen = STEPS.LOGIN;
     devices = [];
     selectedDevice = null;
+    streamIndex = 0;
     tokenOutput = "";
     playbackLog = [];
     resetStreamMetrics();
@@ -235,6 +245,7 @@
 
   function selectDevice(device) {
     selectedDevice = device;
+    streamIndex = normalizeUiStreamIndex(device.streamIndex ?? device.raw?.streamindex ?? device.raw?.stream_type ?? 0);
     screen = STEPS.STREAM;
     tokenOutput = "";
     captureStatus = "Live stream decoder not started.";
@@ -262,21 +273,25 @@
     }
   }
 
-  async function startLiveDecode() {
+  async function startLiveDecode({ forceRestart = false } = {}) {
     if (!selectedDevice) return;
     busy = true;
     connectStreamEvents();
     resetStreamMetrics();
-    setStatus("Starting live stream decoder...");
+    setStatus(`Starting ${streamQualityLabel(streamIndex)} live stream decoder...`);
 
     try {
       const reply = await api("/api/stream/start", {
         method: "POST",
-        body: JSON.stringify({ device: selectedDevice }),
+        body: JSON.stringify({
+          device: { ...selectedDevice, streamIndex },
+          streamIndex,
+          options: { forceRestart },
+        }),
       });
       liveServerActive = true;
-      captureStatus = "Live decoder started. Waiting for the camera stream...";
-      setStatus("Live stream requested.", "success");
+      captureStatus = `${streamQualityLabel(streamIndex)} live decoder started. Waiting for the camera stream...`;
+      setStatus(`${streamQualityLabel(streamIndex)} live stream requested.`, "success");
       log("stream", "start-reply", reply);
       livePlayback.stop();
       startCanvasPlayback(cam0Canvas, "primary", "cam0");
@@ -287,6 +302,25 @@
     } finally {
       busy = false;
     }
+  }
+
+  async function setStreamIndex(nextStreamIndex) {
+    const next = normalizeUiStreamIndex(nextStreamIndex);
+    if (streamIndex === next) return;
+
+    streamIndex = next;
+    log("stream", "quality-selected", {
+      streamIndex,
+      quality: streamQualityLabel(streamIndex),
+      restart: liveServerActive,
+    });
+
+    if (liveServerActive) {
+      await startLiveDecode({ forceRestart: true });
+      return;
+    }
+
+    setStatus(`${streamQualityLabel(streamIndex)} stream selected.`, "success");
   }
 
   function startCanvasPlayback(canvas, track, name) {
@@ -395,10 +429,12 @@
       {frameWindowSeconds}
       {frameChartData}
       {byteChartData}
+      {streamIndex}
       onChangeDevice={changeDevice}
       onStartLive={startLiveDecode}
       onStopLive={stopLiveDecode}
       onGetFeedToken={getFeedToken}
+      onSetStreamIndex={setStreamIndex}
       onToggleDiagnostics={() => (diagnosticsOpen = !diagnosticsOpen)}
       onClearDiagnostics={() => (playbackLog = [])}
       onSetFrameWindow={setFrameWindow}
