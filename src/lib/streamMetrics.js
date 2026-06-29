@@ -1,13 +1,19 @@
 export const FRAME_WINDOWS = [5, 10, 20, 30];
 export const CHART_BUCKET_MS = 100;
+export const CHART_DISPLAY_LAG_MS = CHART_BUCKET_MS;
 export const MAX_FRAME_WINDOW_MS = Math.max(...FRAME_WINDOWS) * 1000;
 
 export function trimSamples(samples, now = Date.now()) {
   return samples.filter((sample) => now - sample.at <= MAX_FRAME_WINDOW_MS + 1000);
 }
 
+export function buildChartXDomain(seconds, now = Date.now()) {
+  const end = now - CHART_DISPLAY_LAG_MS;
+  return [end - seconds * 1000 + CHART_BUCKET_MS, end];
+}
+
 function buildBuckets(seconds, now) {
-  const end = Math.floor(now / CHART_BUCKET_MS) * CHART_BUCKET_MS;
+  const end = Math.floor((now - CHART_DISPLAY_LAG_MS) / CHART_BUCKET_MS) * CHART_BUCKET_MS;
   const start = end - seconds * 1000 + CHART_BUCKET_MS;
   const buckets = new Map();
 

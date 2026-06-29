@@ -356,6 +356,29 @@ video,
   width: 100%;
 }
 
+.uplot-chart {
+  overflow: hidden;
+}
+
+.uplot-chart .uplot {
+  width: 100% !important;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.uplot-chart .u-wrap {
+  width: 100%;
+}
+
+.uplot-chart canvas {
+  border-radius: 0;
+}
+
+.uplot-chart .u-over {
+  cursor: default;
+}
+
 .frame-chart-summary {
   display: flex;
   flex-wrap: wrap;

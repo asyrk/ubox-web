@@ -17,6 +17,7 @@
   export let frameWindowSeconds;
   export let frameChartData;
   export let byteChartData;
+  export let chartXDomain;
   export let streamIndex = 0;
   export let onChangeDevice;
   export let onStartLive;
@@ -64,6 +65,7 @@
     {frameWindowSeconds}
     {frameChartData}
     {byteChartData}
+    {chartXDomain}
     onToggle={onToggleDiagnostics}
     onClear={onClearDiagnostics}
     onSetWindow={onSetFrameWindow}

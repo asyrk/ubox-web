@@ -9,6 +9,7 @@
   import {
     FRAME_WINDOWS,
     buildByteChartData,
+    buildChartXDomain,
     buildFrameChartData,
     trimSamples,
   } from "./lib/streamMetrics.js";
@@ -35,8 +36,11 @@
   let frameSamples = [];
   let byteSamples = [];
   let frameChartNow = Date.now();
+  let chartRenderNow = Date.now();
+  let chartAnimationFrame = null;
   let frameChartData = [];
   let byteChartData = [];
+  let chartXDomain = buildChartXDomain(frameWindowSeconds, chartRenderNow);
   let streamEvents = null;
   let liveServerActive = false;
   let streamIndex = 0;
@@ -107,6 +111,7 @@
   function setFrameWindow(seconds) {
     frameWindowSeconds = seconds;
     frameChartNow = Date.now();
+    chartRenderNow = frameChartNow;
   }
 
   function clearCanvases() {
@@ -363,6 +368,28 @@
     screen = STEPS.DEVICES;
   }
 
+  function animationTimestampToEpoch(timestamp) {
+    const timeOrigin = performance.timeOrigin || Date.now() - performance.now();
+    return timeOrigin + timestamp;
+  }
+
+  function updateChartAnimation(timestamp) {
+    chartRenderNow = animationTimestampToEpoch(timestamp);
+    chartAnimationFrame = window.requestAnimationFrame(updateChartAnimation);
+  }
+
+  function startChartAnimation() {
+    if (chartAnimationFrame !== null) return;
+    chartRenderNow = Date.now();
+    chartAnimationFrame = window.requestAnimationFrame(updateChartAnimation);
+  }
+
+  function stopChartAnimation() {
+    if (chartAnimationFrame === null) return;
+    window.cancelAnimationFrame(chartAnimationFrame);
+    chartAnimationFrame = null;
+  }
+
   onMount(() => {
     const unload = () => stopLiveServerOnUnload();
     const chartTimer = window.setInterval(() => {
@@ -391,12 +418,18 @@
       window.removeEventListener("pagehide", unload);
       window.removeEventListener("beforeunload", unload);
       window.clearInterval(chartTimer);
+      stopChartAnimation();
       stopLiveServerOnUnload();
     };
   });
 
+  $: {
+    if (screen === STEPS.STREAM && diagnosticsOpen) startChartAnimation();
+    else stopChartAnimation();
+  }
   $: frameChartData = buildFrameChartData(frameSamples, frameWindowSeconds, frameChartNow);
   $: byteChartData = buildByteChartData(byteSamples, frameWindowSeconds, frameChartNow);
+  $: chartXDomain = buildChartXDomain(frameWindowSeconds, chartRenderNow);
 </script>
 
 <main class="app-shell">
@@ -429,6 +462,7 @@
       {frameWindowSeconds}
       {frameChartData}
       {byteChartData}
+      {chartXDomain}
       {streamIndex}
       onChangeDevice={changeDevice}
       onStartLive={startLiveDecode}
