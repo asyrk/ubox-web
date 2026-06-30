@@ -34,7 +34,7 @@ Still experimental:
 - WebCodecs is required for live playback. Use a Chromium-based browser.
 - The project is a local viewer, not a packaged desktop app yet.
 
-<img width="963" height="863" alt="image" src="https://github.com/user-attachments/assets/0da3c2c6-22b6-49d4-a162-a0eee0f869e0" />
+<img width="938" height="901" alt="image" src="https://github.com/user-attachments/assets/a9091154-8d5a-4ac8-9043-c8da3e733774" />
 
 ## Why It Works This Way
 
