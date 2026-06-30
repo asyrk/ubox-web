@@ -116,7 +116,8 @@ The name comes from symbols found in the Android native libraries, such as
 P4P handles:
 
 - packet header and light byte obfuscation
-- discovery/query packets
+- master discovery/query packets
+- relay endpoint discovery from query responses
 - relay wake-up
 - relay stream open
 - session IDs (`sid`, `remoteSid`, `videoSid`)
@@ -134,6 +135,7 @@ Important P4P message IDs:
 
 ```text
 0x1051 query request
+0x1052 query response / VPG relay endpoint list
 0x1201 relay wake-up request
 0x1202 relay wake-up response
 0x1205 relay stream request
@@ -143,6 +145,13 @@ Important P4P message IDs:
 0x1409 KCP client packet
 0x140a KCP device packet
 ```
+
+The `0x1051` query goes to a native-seeded master/discovery server list on UDP
+`10240`. Native `p4p_client_send_queryreq(uid, query_kind)` sends to all seeded
+master addresses except when `query_kind == 4`, where it fans out only to the
+first three. Relay servers are not hardcoded: the `0x1052` query response
+contains a VPG item, and the backend extracts up to four relay endpoints from
+that item before sending `0x1201`.
 
 ### KCP
 

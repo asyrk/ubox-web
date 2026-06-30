@@ -53,8 +53,8 @@ flowchart TD
   S1 -- "timer 2 p4p_client_tmout_queryreq<br/>retry 0x1051 every 1000 ms, 10 tries" --> S1
   S1 -- "query timeout<br/>status -0x7d3" --> FAIL
 
-  S1 -- "0x1052 query-rsp<br/>p4p_client_handle_queryrsp<br/>delete timer 2, add timer 3<br/>state=2, send 0x1201" --> S2
-  S2 -- "0x1052 query-rsp repeat<br/>p4p_client_handle_queryrsp<br/>send 0x1201 again" --> S2
+  S1 -- "0x1052 query-rsp<br/>p4p_client_handle_queryrsp<br/>update VPG relay table<br/>delete timer 2, add timer 3<br/>state=2, send 0x1201" --> S2
+  S2 -- "0x1052 query-rsp repeat<br/>refresh VPG relay table<br/>send 0x1201 again" --> S2
   S2 -- "timer 3 p4p_client_tmout_rlywakeupreq<br/>retry 0x1201 every 500 ms, 20 tries" --> S2
   S2 -- "relay wake timeout<br/>status -0x7d4" --> FAIL
 
@@ -174,8 +174,8 @@ names.
 
 | Code | Native/project name | Native role |
 | --- | --- | --- |
-| `0x1051` | `query-req` / `p4p_client_send_queryreq` | Outbound cloud/relay query. |
-| `0x1052` | `query-rsp` / `p4p_client_handle_queryrsp` | Inbound query response; moves state `1 -> 2`. |
+| `0x1051` | `query-req` / `p4p_client_send_queryreq` | Outbound master/discovery query. Sends to first 3 master servers when `query_kind == 4`, otherwise the full seeded master list. |
+| `0x1052` | `query-rsp` / `p4p_client_handle_queryrsp` | Inbound query response; carries VPG relay endpoints and moves state `1 -> 2`. |
 | `0x1054` | `syncdb-rsp` / `p4p_client_handle_syncdbrsp` | Inbound sync DB response; not part of live stream startup path. |
 | `0x1201` | `relay-wakeup-req` / `p4p_client_send_rlywakeupreq` | Outbound relay wake-up request. |
 | `0x1202` | `relay-wakeup-rsp` / `p4p_client_handle_rlywakeuprsp` | Inbound relay wake-up response; accepts only ready byte `2`, then moves `2 -> 3`. |
@@ -269,9 +269,9 @@ flowchart TD
 | Area | Native behavior | Current UBox Web behavior | Match |
 | --- | --- | --- | --- |
 | Initial state | `p4p_client_start()` sets state `1`. | Constructor sets `sessionState.state = 1`. | Yes |
-| Query request | Sends `0x1051` and retries timer type `2` every 1000 ms, 10 tries. | Sends `0x1051` and retries every 1000 ms, 10 tries. | Yes |
+| Query request | Sends `0x1051` to native master/discovery servers and retries timer type `2` every 1000 ms, 10 tries. Fanout is 3 servers when `query_kind == 4`, otherwise the full seeded list. | Sends `0x1051` to the same seeded master/discovery list with the same `query_kind == 4` fanout. | Yes |
 | LAN startup side path | Also sends `0x1301` LAN wake-up or `0x1303` LAN search, with timers `1` or `12`. | Not implemented; LAN stream messages are logged and ignored. | Intentionally no |
-| Query response | `0x1052` updates native VPG/local tables, deletes query timer, adds relay wake timer, sets state `2`, sends `0x1201`. | Parses status/UID/VPG address for diagnostics, learns a VPG wake-up target when present, sets state `2`, starts relay wake timer, sends `0x1201`. | Partial |
+| Query response | `0x1052` updates native VPG/local tables, deletes query timer, adds relay wake timer, sets state `2`, sends `0x1201` to discovered VPG relay endpoints. | Parses the VPG item at payload offset `0x1c`, extracts up to four IPv4 relay targets, stores IPv6 metadata for diagnostics, sets state `2`, starts relay wake timer, sends `0x1201` to the discovered IPv4 targets. | Mostly |
 | Relay wake response | `0x1202` accepted only in state `2` and only when native ready byte is `2`; then state `3`, timer `4`, send `0x1205`. | Same state gate and ready-byte gate when `requireWakeupReadyStatus` is enabled; then state `3`, send/retry `0x1205`. | Mostly |
 | Relay stream request | Native sends `0x1205` only in state `3`, retries every 1000 ms, 16 tries. | Same state and retry shape. Payload may still differ in fields not fully reconstructed. | Partial |
 | Relay stream response | `0x1206` success sets state `6`, starts punch timer `6`, keepalive timer `7`, sends `0x130b` and `0x1405`. | `0x1206` success sets state `6`, starts punch retries, sends `0x130b` and `0x1405`. | Yes |
@@ -291,8 +291,10 @@ The highest-signal remaining gaps are:
 
 1. Native LAN path is missing: `0x1301`, `0x1302`, `0x1303`, `0x1304`, `0x1307`,
    `0x1308`, and state `4/8`.
-2. Native `0x1052` updates full VPG/local routing tables; current code only
-   learns one VPG wake-up target from the query response.
+2. Native `0x1052` stores full VPG/local routing tables, including IPv6 relay
+   slots. Current code extracts the native IPv4 relay slots used by the
+   non-IPv6 path and logs IPv6 metadata, but does not dial IPv6 relays or keep
+   the full native VPG cache/refcount model.
 3. Native `0x130c` can promote to state `8` when it identifies a LAN path;
    current code always promotes to state `7`.
 4. Native accepts `0x130e` in state `4`; current code intentionally limits it

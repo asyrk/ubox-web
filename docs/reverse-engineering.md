@@ -420,17 +420,20 @@ Implement one stage at a time. Do not jump straight to video.
 Order:
 
 1. UDP socket bind.
-2. Send `0x1051` query to discovery servers.
-3. Send `0x1201` relay wakeup to relay servers.
-4. Decode inbound `0x1202`.
-5. Send `0x1205` relay stream request to responder.
-6. Decode inbound `0x1206`.
-7. Extract `sid`, `remoteSid`, `videoSid`.
-8. Send keepalive `0x1405`.
-9. Send start-video `0x1407`.
-10. Accept `0x1409` / `0x140a`.
-11. Feed KCP.
-12. Drain KCP messages.
+2. Send `0x1051` query to master/discovery servers.
+3. Decode inbound `0x1052` and parse the native VPG item at payload offset
+   `0x1c`.
+4. Extract up to four relay wake-up endpoints from that VPG item.
+5. Send `0x1201` relay wakeup to those discovered relay endpoints.
+6. Decode inbound `0x1202`.
+7. Send `0x1205` relay stream request to responder.
+8. Decode inbound `0x1206`.
+9. Extract `sid`, `remoteSid`, `videoSid`.
+10. Send keepalive `0x1405`.
+11. Send start-video `0x1407`.
+12. Accept `0x1409` / `0x140a`.
+13. Feed KCP.
+14. Drain KCP messages.
 
 Each stage should emit logs before moving to next stage.
 
@@ -509,7 +512,8 @@ stage 7: video records continue?
 
 Possible differences:
 
-- relay server region
+- VPG relay endpoints returned by `0x1052`
+- IPv4 vs IPv6 relay availability
 - device type byte
 - stream index
 - channel

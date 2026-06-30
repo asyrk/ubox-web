@@ -5,9 +5,11 @@ Out of scope: login, cloud API parsing, H.264 parsing, browser playback.
 
 ## Goal
 
-Backend opens one local UDP socket, wakes camera through UBox relay servers, asks
-for a live relay stream, starts video, receives KCP-wrapped stream data, sends
-ACK/control packets, and restarts session when transport stalls.
+Backend opens one local UDP socket, queries UBox master/discovery servers,
+extracts relay endpoints from the query response, wakes the camera through those
+discovered relay endpoints, asks for a live relay stream, starts video, receives
+KCP-wrapped stream data, sends ACK/control packets, and restarts session when
+transport stalls.
 
 ## Main Code
 
@@ -20,9 +22,12 @@ ACK/control packets, and restarts session when transport stalls.
   - 16-byte P4P header build/parse
   - message names
 
-## Static Endpoints Used
+## Endpoint Discovery
 
-Discovery servers, UDP port `10240`:
+The only static cloud endpoints used by the client path are the native-seeded
+master/discovery servers. These are populated by native `p4p_master_init()` and
+used by `p4p_client_send_queryreq()` for `0x1051` query requests on UDP
+`10240`:
 
 ```text
 175.178.248.245
@@ -33,17 +38,28 @@ Discovery servers, UDP port `10240`:
 43.157.31.112
 ```
 
-Relay servers, UDP port `20001`:
+Native query fanout depends on `query_kind`, which is copied from the Java
+`zoneID` / native start config:
 
 ```text
-141.95.7.68
-23.160.72.229
-79.72.62.201
-130.94.90.222
+query_kind == 4  -> first 3 master/discovery servers
+anything else    -> full seeded master/discovery server list
 ```
 
-These may be region/vendor dependent. If relay open fails, server list or region
-behavior is a prime suspect.
+Relay servers are not hardcoded. The `0x1052` query response contains a native
+VPG item. Current code parses that item and extracts up to four relay wake-up
+targets:
+
+```text
+VPG item base in 0x1052 payload: 0x1c
+flag[index]                    : base + 0x08 + index
+port[index]                    : base + 0x0c + index * 2, network byte order
+IPv4[index]                    : base + 0x1c + index * 4
+IPv6[index]                    : base + 0x2c + index * 0x10
+```
+
+Only IPv4 relay targets are currently sent to, matching the non-IPv6 path we
+use. IPv6 relay target metadata is logged for diagnostics but not dialed.
 
 ## Packet Wrapper
 
@@ -94,25 +110,35 @@ Message IDs currently used:
 3. Send discovery query.
 
    - Message: `0x1051`.
-   - Destination: all discovery servers on UDP `10240`.
+   - Destination: native master/discovery servers on UDP `10240`.
+   - Fanout: first 3 servers when `query_kind == 4`, otherwise the full seeded
+     list.
    - Payload includes camera UID fixed to 20 ASCII bytes.
    - Event: `p4p-query-sent`.
 
-4. Start relay wake timer.
+4. Wait for discovery query response.
 
-   - Every `1000 ms`, until relay established.
+   - Incoming message: `0x1052`.
+   - Updates session state from query to relay wake-up.
+   - Parses the native VPG item at payload offset `0x1c`.
+   - Stores discovered relay wake-up targets.
+   - Event: `p4p-query-rsp`.
+
+5. Start relay wake timer.
+
+   - Every `500 ms`, until relay wake response or timeout.
    - Message: `0x1201`.
-   - Destination: all relay servers on UDP `20001`.
+   - Destination: discovered VPG relay targets from `0x1052`.
    - Payload includes camera UID fixed to 20 ASCII bytes.
    - Event: `relay-wakeup-sent`.
 
-5. Wait for relay wake response.
+6. Wait for relay wake response.
 
    - Incoming message: `0x1202`.
    - Source IP/port becomes `relayPeer`.
    - Immediately send relay stream request to same peer.
 
-6. Send relay stream request.
+7. Send relay stream request.
 
    - Message: `0x1205`.
    - Destination: `relayPeer`.
@@ -379,7 +405,8 @@ kcpState.peekSize
 
 Likely:
 
-- wrong relay server set for camera region/model
+- no usable VPG relay target in the `0x1052` query response
+- discovered relay endpoint is unreachable from this network
 - device identity fields wrong
 - device type wrong
 - camera asleep/offline/cellular unreachable
@@ -387,6 +414,12 @@ Likely:
 Need:
 
 - events through `relay-wakeup-sent`
+- `p4p-query-rsp` fields:
+  - `vpgId`
+  - `vpgFlags`
+  - `relayTargetCount`
+  - `relayTargets`
+  - `ipv6RelayTargetCount`
 - whether any `0x1202` arrives
 - sanitized `relay-stream-req-sent` fields:
   - `loginIdPresent`
@@ -498,7 +531,8 @@ Redact/remove:
 Current implementation matches one observed camera/app path. Other camera models
 or firmware versions may differ in:
 
-- relay server region
+- VPG item contents returned by `0x1052`
+- IPv4 vs IPv6 relay availability
 - `deviceType`
 - `streamIndex`
 - channel number

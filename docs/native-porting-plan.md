@@ -52,9 +52,34 @@ header magic/version 0x1807 / 0x0010
 payload length       0x2c
 message              0x1051
 msg_len              0x28
-payload              20-byte UID plus query kind fields
-send count           8 server addresses, or 3 when query_kind == 4
+payload              20-byte UID copied at payload offset 0x04
+destination          native-seeded master/discovery addresses on UDP 10240
+send count           8 seeded address slots, or 3 when query_kind == 4
 encoding             p4p_crypto_encode(packet, 0x3c)
+```
+
+`query_kind` controls master/discovery fanout only. It does not choose relay
+servers.
+
+Native `0x1052` query response handling:
+
+```text
+handler              p4p_client_handle_queryrsp
+VPG item source      response payload offset 0x1c
+native store         p4p_local_update_vpgitem(packet + 0x2c, ...)
+                     which is payload + 0x1c after the 16-byte P4P header
+next state           state 1 -> 2
+next send            p4p_client_send_rlywakeupreq(session)
+```
+
+The relay wake-up destinations are discovered from the VPG item, not hardcoded:
+
+```text
+VPG item flag[i]     item + 0x08 + i
+VPG item port[i]     item + 0x0c + i * 2
+VPG item IPv4[i]     item + 0x1c + i * 4
+VPG item IPv6[i]     item + 0x2c + i * 0x10
+slot count           4
 ```
 
 Native `0x1201` relay wake-up request:
