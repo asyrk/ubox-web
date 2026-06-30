@@ -7,6 +7,7 @@
 	export let unit = "fps";
 	export let precision = 0;
 	export let xDomain = undefined;
+	export let showSecondary = true;
 
 	let chartEl;
 	let plot;
@@ -19,7 +20,7 @@
 	let lastYMin = null;
 	let lastYMax = null;
 
-	$: maxValue = Math.max(1, ...data.flatMap((row) => [row.primary || 0, row.secondary || 0]));
+	$: maxValue = Math.max(1, ...data.flatMap((row) => (showSecondary ? [row.primary || 0, row.secondary || 0] : [row.primary || 0])));
 	$: yDomain = [0, maxValue];
 	$: current = data.at(-1) || { primary: 0, secondary: 0 };
 	$: primaryValue = Number(current.primary || 0).toFixed(precision);
@@ -29,11 +30,12 @@
 	$: if (plot && xDomain && yDomain) setPlotScales();
 
 	function buildPlotData(rows) {
-		return [
+		const plotRows = [
 			rows.map((row) => row.at),
 			rows.map((row) => row.primary ?? null),
-			rows.map((row) => row.secondary ?? null),
 		];
+		if (showSecondary) plotRows.push(rows.map((row) => row.secondary ?? null));
+		return plotRows;
 	}
 
 	function cssVar(name) {
@@ -104,12 +106,16 @@
 					width: 1.5,
 					points: { show: false },
 				},
-				{
-					label: "Secondary",
-					stroke: chartColor("--chart-2"),
-					width: 1.5,
-					points: { show: false },
-				},
+				...(showSecondary
+					? [
+							{
+								label: "Secondary",
+								stroke: chartColor("--chart-2"),
+								width: 1.5,
+								points: { show: false },
+							},
+						]
+					: []),
 			],
 		};
 	}
@@ -181,5 +187,7 @@
 
 <div class="frame-chart-summary">
 	<span><strong>{primaryValue}</strong> primary {unit}</span>
-	<span><strong>{secondaryValue}</strong> secondary {unit}</span>
+	{#if showSecondary}
+		<span><strong>{secondaryValue}</strong> secondary {unit}</span>
+	{/if}
 </div>

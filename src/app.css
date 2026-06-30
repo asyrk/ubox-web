@@ -269,6 +269,10 @@ p {
   gap: 12px;
 }
 
+.video-grid.single-camera {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .camera-pane {
   min-width: 0;
 }

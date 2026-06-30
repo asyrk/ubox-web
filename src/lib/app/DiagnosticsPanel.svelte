@@ -12,6 +12,7 @@
   export let frameChartData = [];
   export let byteChartData = [];
   export let chartXDomain;
+  export let showSecondaryStream = true;
   export let onToggle;
   export let onClear;
   export let onSetWindow;
@@ -54,7 +55,7 @@
               <p>KB per second received by the browser from the live H.264 streams.</p>
             </div>
           </div>
-          <FrameRateChart data={byteChartData} unit="KB/s" precision={1} xDomain={chartXDomain} />
+          <FrameRateChart data={byteChartData} unit="KB/s" precision={1} xDomain={chartXDomain} showSecondary={showSecondaryStream} />
         </section>
         <section class="frame-metrics">
           <div class="frame-metrics-head">
@@ -63,7 +64,7 @@
               <p>Frames per second parsed by the browser from the live H.264 streams.</p>
             </div>
           </div>
-          <FrameRateChart data={frameChartData} xDomain={chartXDomain} />
+          <FrameRateChart data={frameChartData} xDomain={chartXDomain} showSecondary={showSecondaryStream} />
         </section>
       </div>
       <pre class="log">{playbackLog.join("\n")}</pre>

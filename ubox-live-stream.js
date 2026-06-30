@@ -150,6 +150,10 @@ function normalizeStreamIndex(value, fallback = 0) {
   return Math.max(0, Math.min(3, Math.trunc(n)));
 }
 
+function isNativeTwoSensorDevice(identity) {
+  return identity?.cloudDeviceType === 8 || identity?.cloudDeviceType === 9;
+}
+
 function flattenObject(object, prefix = "", out = {}) {
   if (!object || typeof object !== "object" || Buffer.isBuffer(object)) return out;
   for (const [key, value] of Object.entries(object)) {
@@ -736,6 +740,10 @@ class UBoxLiveStreamSession {
       videoSid: this.videoSid,
       channel: this.channel,
       streamIndex: this.identity.streamIndex,
+      nativeVideoRouting: {
+        twoSensorDevice: isNativeTwoSensorDevice(this.identity),
+        rule: isNativeTwoSensorDevice(this.identity) ? "split-by-cam-index" : "all-frames-to-primary",
+      },
       sessionState: {
         state: this.sessionState.state,
         localSid: this.sessionState.localSid,
@@ -2140,7 +2148,9 @@ class UBoxLiveStreamSession {
       this.counters.bytesWritten += annexB.length;
       const clean = cleanAnnexB(annexB);
       if (clean) {
-        const track = meta.frameMeta?.cam === 1 || meta.streamByte === 4 ? "secondary" : "primary";
+        // Native OnLiveVideoStateCallback only routes cam_index to sensor1 for
+        // DeviceUtil.is2CameraSendSor(), i.e. vrexttype 8 or 9.
+        const track = isNativeTwoSensorDevice(this.identity) && meta.frameMeta?.cam === 1 ? "secondary" : "primary";
         this.broadcastH264(clean, track);
         if (track === "primary") this.broadcastMp4(clean);
       }

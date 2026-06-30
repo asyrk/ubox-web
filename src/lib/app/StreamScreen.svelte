@@ -19,6 +19,7 @@
   export let byteChartData;
   export let chartXDomain;
   export let streamIndex = 0;
+  export let showSecondaryStream = false;
   export let onStartLive;
   export let onStopLive;
   export let onSetStreamIndex;
@@ -41,9 +42,11 @@
     </Card.Header>
 
     <Card.Content>
-      <div class="video-grid">
+      <div class={`video-grid ${showSecondaryStream ? "" : "single-camera"}`}>
         <CameraPane title="Live" bind:canvas={cam0Canvas} />
-        <CameraPane title="Secondary" bind:canvas={cam1Canvas} />
+        {#if showSecondaryStream}
+          <CameraPane title="Secondary" bind:canvas={cam1Canvas} />
+        {/if}
       </div>
 
       <div class="stream-controls">
@@ -63,6 +66,7 @@
     {frameChartData}
     {byteChartData}
     {chartXDomain}
+    {showSecondaryStream}
     onToggle={onToggleDiagnostics}
     onClear={onClearDiagnostics}
     onSetWindow={onSetFrameWindow}

@@ -5,6 +5,7 @@
   import LoginScreen from "./lib/app/LoginScreen.svelte";
   import StreamScreen from "./lib/app/StreamScreen.svelte";
   import { api, flattenDevices } from "./lib/api.js";
+  import { getNativeCameraLayout } from "./lib/deviceLayout.js";
   import { clearCanvas, createLivePlaybackController } from "./lib/livePlayback.js";
   import {
     FRAME_WINDOWS,
@@ -44,6 +45,8 @@
   let streamEvents = null;
   let liveServerActive = false;
   let streamIndex = 0;
+  let selectedCameraLayout = getNativeCameraLayout(null);
+  let showSecondaryStream = false;
 
   let account = "";
   let password = "";
@@ -249,12 +252,23 @@
   }
 
   function selectDevice(device) {
+    const cameraLayout = getNativeCameraLayout(device);
     selectedDevice = device;
     streamIndex = normalizeUiStreamIndex(device.streamIndex ?? device.raw?.streamindex ?? device.raw?.stream_type ?? 0);
     screen = STEPS.STREAM;
     tokenOutput = "";
     captureStatus = "Live stream decoder not started.";
     clearCanvases();
+    log("app", "device-layout-detected", {
+      uid: device.uid,
+      vrexttype: cameraLayout.vrexttype,
+      modelDeviceType: cameraLayout.modelDeviceType,
+      splitView: cameraLayout.splitView,
+      isTwoCamera: cameraLayout.isTwoCamera,
+      isTwoSensor: cameraLayout.isTwoSensor,
+      isT23ThreeEye: cameraLayout.isT23ThreeEye,
+      showSecondaryStream: cameraLayout.showSecondaryStream,
+    });
   }
 
   async function startLiveDecode({ forceRestart = false } = {}) {
@@ -279,7 +293,17 @@
       log("stream", "start-reply", reply);
       livePlayback.stop();
       startCanvasPlayback(cam0Canvas, "primary", "cam0");
-      startCanvasPlayback(cam1Canvas, "secondary", "cam1");
+      if (showSecondaryStream) {
+        startCanvasPlayback(cam1Canvas, "secondary", "cam1");
+      } else {
+        clearCanvas(cam1Canvas);
+        log("cam1", "secondary-stream-skipped", {
+          reason: "native-single-lens-layout",
+          vrexttype: selectedCameraLayout.vrexttype,
+          modelDeviceType: selectedCameraLayout.modelDeviceType,
+          splitView: selectedCameraLayout.splitView,
+        });
+      }
     } catch (error) {
       setStatus(error.message, "danger");
       log("stream", "start-error", { message: error.message, data: error.data });
@@ -409,6 +433,8 @@
   $: frameChartData = buildFrameChartData(frameSamples, frameWindowSeconds, frameChartNow);
   $: byteChartData = buildByteChartData(byteSamples, frameWindowSeconds, frameChartNow);
   $: chartXDomain = buildChartXDomain(frameWindowSeconds, chartRenderNow);
+  $: selectedCameraLayout = getNativeCameraLayout(selectedDevice);
+  $: showSecondaryStream = selectedCameraLayout.showSecondaryStream;
 </script>
 
 <main class="app-shell">
@@ -443,6 +469,7 @@
       {byteChartData}
       {chartXDomain}
       {streamIndex}
+      {showSecondaryStream}
       onStartLive={startLiveDecode}
       onStopLive={stopLiveDecode}
       onSetStreamIndex={setStreamIndex}

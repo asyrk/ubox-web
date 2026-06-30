@@ -45,20 +45,33 @@ export function createLivePlaybackController({ api, log, setCaptureStatus, recor
     playbacks.clear();
   }
 
-  async function waitForH264Codec(signal) {
-    for (let i = 0; i < 80; i += 1) {
+  async function waitForH264Codec(signal, { attempts = 8, intervalMs = 250, name = "stream", track = "primary" } = {}) {
+    log(name, "codec-wait-start", { track, attempts, intervalMs });
+    for (let i = 0; i < attempts; i += 1) {
       if (signal?.aborted) throw new DOMException("Live playback was stopped.", "AbortError");
       const reply = await api("/api/stream/status");
       const codec = reply?.session?.mp4Codec;
-      if (codec) return codec;
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      if (codec) {
+        log(name, "codec-wait-found", { track, codec, attempt: i + 1 });
+        return codec;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
     }
+    log(name, "codec-wait-timeout", { track, fallback: "avc1.640016" });
     return "avc1.640016";
   }
 
   async function startCanvas(canvas, track = "primary", name = track) {
-    if (!canvas) return;
+    if (!canvas) {
+      log(name, "canvas-missing", { track });
+      return;
+    }
     if (!("VideoDecoder" in window) || !("EncodedVideoChunk" in window)) {
+      log(name, "webcodecs-missing", {
+        track,
+        hasVideoDecoder: "VideoDecoder" in window,
+        hasEncodedVideoChunk: "EncodedVideoChunk" in window,
+      });
       throw new Error("This browser does not expose WebCodecs VideoDecoder.");
     }
 
@@ -68,20 +81,6 @@ export function createLivePlaybackController({ api, log, setCaptureStatus, recor
     clearCanvas(canvas);
 
     const context = canvas.getContext("2d");
-    const codec = await waitForH264Codec(abort.signal);
-    const config = {
-      codec,
-      avc: { format: "annexb" },
-      hardwareAcceleration: "prefer-hardware",
-      optimizeForLatency: true,
-    };
-    const support = await VideoDecoder.isConfigSupported(config).catch((error) => ({
-      supported: false,
-      error,
-    }));
-    if (!support.supported) {
-      throw new Error(`Browser rejected raw H.264 decoder config ${codec}.`);
-    }
 
     let decodedFrames = 0;
     let lastPaintedAt = 0;
@@ -92,47 +91,80 @@ export function createLivePlaybackController({ api, log, setCaptureStatus, recor
     const targetBufferFrames = 12;
     const maxBufferFrames = 45;
     const frameIntervalMs = 1000 / 15;
-    const decoder = new VideoDecoder({
-      output(frame) {
-        try {
-          if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-            canvas.width = frame.displayWidth;
-            canvas.height = frame.displayHeight;
-            log(name, "webcodecs-size", {
-              track,
-              width: frame.displayWidth,
-              height: frame.displayHeight,
-            });
-          }
-          context.drawImage(frame, 0, 0, canvas.width, canvas.height);
-          decodedFrames += 1;
-          lastPaintedAt = performance.now();
-          if (decodedFrames <= 5 || decodedFrames % 30 === 0) {
-            setCaptureStatus(`Live WebCodecs: ${track} ${decodedFrames} frame(s) decoded.`);
-            log(name, "webcodecs-frame-decoded", { track, frames: decodedFrames });
-          }
-        } finally {
-          frame.close();
-        }
-      },
-      error(error) {
-        setCaptureStatus(error.message);
-        log(name, "webcodecs-error", { track, message: error.message });
-      },
-    });
-    playback.decoder = decoder;
-    decoder.configure(support.config || config);
 
+    log(name, "h264-fetch-start", { track });
     const response = await fetch(`/api/stream/live.h264?track=${encodeURIComponent(track)}&t=${Date.now()}`, {
       signal: abort.signal,
     });
     if (!response.ok || !response.body) throw new Error(`Live H.264 request failed: ${response.status}`);
-    log(name, "webcodecs-reader-start", { track, codec });
+    log(name, "h264-client-opened", {
+      track,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+    });
 
     const reader = response.body.getReader();
     let pending = new Uint8Array();
     let timestamp = 0;
     const duration = Math.round(1_000_000 / 15);
+    let decoder = null;
+
+    async function configureDecoder() {
+      const codec = await waitForH264Codec(abort.signal, { name, track });
+      const config = {
+        codec,
+        avc: { format: "annexb" },
+        hardwareAcceleration: "prefer-hardware",
+        optimizeForLatency: true,
+      };
+      log(name, "decoder-config-start", { track, codec, buffered: bufferedFrames.length });
+      const support = await VideoDecoder.isConfigSupported(config).catch((error) => ({
+        supported: false,
+        error,
+      }));
+      if (!support.supported) {
+        log(name, "decoder-config-failed", {
+          track,
+          codec,
+          message: support.error?.message || "unsupported config",
+          buffered: bufferedFrames.length,
+        });
+        throw new Error(`Browser rejected raw H.264 decoder config ${codec}.`);
+      }
+
+      decoder = new VideoDecoder({
+        output(frame) {
+          try {
+            if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+              canvas.width = frame.displayWidth;
+              canvas.height = frame.displayHeight;
+              log(name, "webcodecs-size", {
+                track,
+                width: frame.displayWidth,
+                height: frame.displayHeight,
+              });
+            }
+            context.drawImage(frame, 0, 0, canvas.width, canvas.height);
+            decodedFrames += 1;
+            lastPaintedAt = performance.now();
+            if (decodedFrames <= 5 || decodedFrames % 30 === 0) {
+              setCaptureStatus(`Live WebCodecs: ${track} ${decodedFrames} frame(s) decoded.`);
+              log(name, "webcodecs-frame-decoded", { track, frames: decodedFrames });
+            }
+          } finally {
+            frame.close();
+          }
+        },
+        error(error) {
+          setCaptureStatus(error.message);
+          log(name, "webcodecs-error", { track, message: error.message });
+        },
+      });
+      playback.decoder = decoder;
+      decoder.configure(support.config || config);
+      log(name, "decoder-configured", { track, codec, buffered: bufferedFrames.length });
+      pumpBufferedFrame();
+    }
 
     function dropOldBufferedFrames() {
       while (bufferedFrames.length > maxBufferFrames) {
@@ -179,6 +211,11 @@ export function createLivePlaybackController({ api, log, setCaptureStatus, recor
     }
 
     playback.timer = window.setInterval(pumpBufferedFrame, frameIntervalMs);
+    configureDecoder().catch((error) => {
+      if (error.name === "AbortError") return;
+      setCaptureStatus(error.message);
+      log(name, "decoder-start-error", { track, message: error.message, buffered: bufferedFrames.length });
+    });
 
     (async () => {
       while (true) {
@@ -211,6 +248,9 @@ export function createLivePlaybackController({ api, log, setCaptureStatus, recor
               types: types.join(","),
               msSincePaint: lastPaintedAt ? Math.round(performance.now() - lastPaintedAt) : null,
             });
+          }
+          if (!decoder && (receivedFrames <= 5 || receivedFrames % 30 === 0)) {
+            log(name, "frames-buffered-before-decoder", { track, received: receivedFrames, buffered: bufferedFrames.length });
           }
         }
       }
