@@ -15,14 +15,13 @@ const DISCOVERY_SERVERS = [
   "43.157.31.112",
 ];
 
-const RELAY_SERVERS = [
-  "141.95.7.68",
-  "23.160.72.229",
-  "79.72.62.201",
-  "130.94.90.222",
-];
+function discoveryServersForQueryKind(queryKind) {
+  return queryKind === 4 ? DISCOVERY_SERVERS.slice(0, 3) : DISCOVERY_SERVERS;
+}
 
 const NON_LAN_KNOCK_STATES = new Set([3, 5, 6]);
+
+// remove when LAN support added
 const IGNORED_LAN_STREAM_MESSAGES = new Set([0x1301, 0x1302, 0x1303, 0x1304, 0x1307, 0x1308]);
 
 const DEFAULT_STREAM_OPTIONS = {
@@ -90,6 +89,51 @@ function uniqueTargets(targets) {
     seen.add(key);
     return true;
   });
+}
+
+function parseNativeVpgItem(payload) {
+  const base = 0x1c;
+  const itemLength = 0x6c;
+  if (!Buffer.isBuffer(payload) || payload.length < base + 0x2c) {
+    return { present: false, vpgId: null, flags: [], targets: [], ipv6Targets: [], prefix: null };
+  }
+
+  const targets = [];
+  const ipv6Targets = [];
+  const item = payload.subarray(base, Math.min(payload.length, base + itemLength));
+  const vpgId = item.length >= 2 ? item.readUInt16LE(0) : null;
+  const flags = [];
+
+  for (let index = 0; index < 4; index += 1) {
+    const flag = item.length > 0x08 + index ? item[0x08 + index] : 0;
+    flags.push(flag);
+    const portOffset = 0x0c + index * 2;
+    const port = item.length >= portOffset + 2 ? item.readUInt16BE(portOffset) : 0;
+
+    if ((flag & 1) !== 0 && item.length >= 0x1c + index * 4 + 4) {
+      const address = ipv4FromLe(item.readUInt32LE(0x1c + index * 4));
+      const target = normalizeUdpTarget(address, port);
+      if (target) targets.push({ ...target, source: "query-rsp-vpg", index, flag });
+    }
+
+    if ((flag & 2) !== 0 && item.length >= 0x2c + index * 0x10 + 0x10) {
+      ipv6Targets.push({
+        index,
+        port,
+        flag,
+        addressHex: item.subarray(0x2c + index * 0x10, 0x2c + index * 0x10 + 0x10).toString("hex"),
+      });
+    }
+  }
+
+  return {
+    present: true,
+    vpgId,
+    flags,
+    targets: uniqueTargets(targets),
+    ipv6Targets,
+    prefix: item.subarray(0, Math.min(item.length, 0x6c)).toString("hex"),
+  };
 }
 
 function firstValue(object, names) {
@@ -610,7 +654,7 @@ class UBoxLiveStreamSession {
     };
     this.relayEstablished = false;
     this.relayPeer = null;
-    this.learnedVpgTarget = null;
+    this.learnedVpgTargets = [];
     this.stopping = false;
     this.lastInboundAt = 0;
     this.lastAliveAt = 0;
@@ -903,15 +947,16 @@ class UBoxLiveStreamSession {
       return false;
     }
     const payload = Buffer.alloc(44);
-    payload[0] = this.sessionState.queryKind & 0xff;
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 4);
     const packet = buildPacket({ msg: 0x1051, payload, msgLen: 0x28 });
-    for (const host of DISCOVERY_SERVERS) this.send(host, 10240, packet, true);
+    const servers = discoveryServersForQueryKind(this.sessionState.queryKind);
+    for (const host of servers) this.send(host, 10240, packet, true);
     this.counters.queryPackets += 1;
     this.manager.emit("p4p-query-sent", {
       uid: this.identity.uid,
       queryKind: this.sessionState.queryKind,
-      servers: DISCOVERY_SERVERS.length,
+      servers: servers.length,
+      nativeQueryKind4Fanout: this.sessionState.queryKind === 4,
       packets: this.counters.queryPackets,
     });
     return true;
@@ -949,8 +994,9 @@ class UBoxLiveStreamSession {
     this.queryTimer = null;
     this.sessionState.state = 2;
     this.relayPendingSince = Date.now();
-    const learnedTarget = normalizeUdpTarget(query.vpgIp, query.vpgPort);
-    if (learnedTarget) this.learnedVpgTarget = learnedTarget;
+    if (Array.isArray(query.relayTargets)) {
+      this.learnedVpgTargets = uniqueTargets(query.relayTargets);
+    }
     this.relayWakeRetriesLeft = Number(this.options.relayWakeupAttempts || 20);
     if (!this.relayTimer) {
       this.relayTimer = setInterval(() => this.relayWakeupTick(), Number(this.options.relayWakeupMs || 500));
@@ -959,9 +1005,9 @@ class UBoxLiveStreamSession {
       reason,
       from: rinfo ? `${rinfo.address}:${rinfo.port}` : undefined,
       status: query.status,
-      vpgIp: query.vpgIp,
-      vpgPort: query.vpgPort,
-      learnedVpgTarget: this.learnedVpgTarget ? `${this.learnedVpgTarget.address}:${this.learnedVpgTarget.port}` : null,
+      vpgId: query.vpgId,
+      relayTargets: this.learnedVpgTargets.map((target) => `${target.address}:${target.port}`),
+      relayTargetCount: this.learnedVpgTargets.length,
       state: this.sessionState.state,
       intervalMs: Number(this.options.relayWakeupMs || 500),
       attempts: this.relayWakeRetriesLeft,
@@ -1034,10 +1080,7 @@ class UBoxLiveStreamSession {
   }
 
   relayWakeupTargets() {
-    return uniqueTargets([
-      ...(this.learnedVpgTarget ? [{ ...this.learnedVpgTarget, source: "query-rsp" }] : []),
-      ...RELAY_SERVERS.map((address) => ({ address, port: 20001, source: "static" })),
-    ]);
+    return uniqueTargets(this.learnedVpgTargets);
   }
 
   sendRelayWakeup(reason = "timer") {
@@ -1056,12 +1099,19 @@ class UBoxLiveStreamSession {
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 4);
     const packet = buildPacket({ msg: 0x1201, payload, msgLen: 0x24 });
     const targets = this.relayWakeupTargets();
+    if (targets.length === 0) {
+      this.manager.emit("relay-wakeup-skipped", {
+        state: this.sessionState.state,
+        reason: "no-native-vpg-relay-targets",
+      });
+      return;
+    }
     for (const target of targets) this.send(target.address, target.port, packet, true);
     this.counters.relayWakePackets += 1;
     this.manager.emit("relay-wakeup-sent", {
       reason,
       servers: targets.length,
-      learnedVpgTarget: this.learnedVpgTarget ? `${this.learnedVpgTarget.address}:${this.learnedVpgTarget.port}` : null,
+      relayTargets: targets.map((target) => `${target.address}:${target.port}`),
       packets: this.counters.relayWakePackets,
       retriesLeft: this.relayWakeRetriesLeft,
     });
@@ -1369,7 +1419,7 @@ class UBoxLiveStreamSession {
     });
     this.relayEstablished = false;
     this.relayPeer = null;
-    this.learnedVpgTarget = null;
+    this.learnedVpgTargets = [];
     clearInterval(this.queryTimer);
     this.queryTimer = null;
     clearInterval(this.relayTimer);
@@ -1562,16 +1612,22 @@ class UBoxLiveStreamSession {
   handleQueryResponse(payload, rinfo) {
     const status = payload.length >= 2 ? payload.readInt16LE(0) : null;
     const uid = payload.length >= 0x18 ? readFixedAsciiBuffer(payload.subarray(4, 0x18)) : "";
-    const vpgIpRaw = payload.length >= 0x1c ? payload.readUInt32LE(0x18) : null;
-    const vpgPort = payload.length >= 0x1e ? payload.readUInt16LE(0x1c) : null;
+    const vpgMapVersion = payload.length >= 0x1c ? payload.readUInt32LE(0x18) : null;
+    const vpgItem = parseNativeVpgItem(payload);
     const query = {
       from: `${rinfo.address}:${rinfo.port}`,
       status,
       uid,
-      vpgIp: vpgIpRaw === null ? null : ipv4FromLe(vpgIpRaw),
-      vpgPort,
+      vpgMapVersion,
+      vpgId: vpgItem.vpgId,
+      vpgFlags: vpgItem.flags,
+      relayTargets: vpgItem.targets,
+      relayTargetCount: vpgItem.targets.length,
+      ipv6RelayTargetCount: vpgItem.ipv6Targets.length,
+      ipv6RelayTargets: vpgItem.ipv6Targets,
       state: this.sessionState.state,
       prefix: payload.subarray(0, Math.min(payload.length, 64)).toString("hex"),
+      vpgPrefix: vpgItem.prefix,
     };
     this.manager.emit("p4p-query-rsp", query);
 
@@ -1587,6 +1643,7 @@ class UBoxLiveStreamSession {
     }
 
     if (this.sessionState.state === 2) {
+      this.learnedVpgTargets = uniqueTargets(query.relayTargets);
       this.sendRelayWakeup("query-rsp-repeat");
       return;
     }
