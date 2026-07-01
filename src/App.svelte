@@ -98,7 +98,6 @@
   }
 
   const livePlayback = createLivePlaybackController({
-    api,
     log,
     setCaptureStatus,
     recordFrame: recordReceivedFrame,
