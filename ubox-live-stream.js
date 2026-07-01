@@ -40,7 +40,6 @@ const DEFAULT_STREAM_OPTIONS = {
   kcpSkipThrottleMs: 1500,
   relayRenewAfterMs: 15000,
   relayRenewThrottleMs: 10000,
-  relayReestablishTimeoutMs: 12000,
   reuseStaleAfterMs: 10000,
   rdtAckIntervalMs: 25,
   rdtAckMinIntervalMs: 20,
@@ -1375,20 +1374,6 @@ class UBoxLiveStreamSession {
   checkVideoWatchdog() {
     const now = Date.now();
     if (!this.relayEstablished || !this.relayPeer) {
-      const pendingMs = this.relayPendingSince ? now - this.relayPendingSince : now - Date.parse(this.startedAt);
-      const timeoutMs = Number(this.options.relayReestablishTimeoutMs || 8000);
-      if (pendingMs > timeoutMs) {
-        this.manager.emit("relay-reestablish-timeout", {
-          sessionId: this.sessionId,
-          pendingMs,
-          timeoutMs,
-          relay: Boolean(this.relayPeer),
-          sid: this.sid,
-          remoteSid: this.remoteSid,
-          videoSid: this.videoSid,
-        });
-        this.manager.restartSession(this, "relay-reestablish-timeout", { pendingMs, timeoutMs });
-      }
       return;
     }
     const quietMs = this.lastH264At ? now - this.lastH264At : now - Date.parse(this.startedAt);
