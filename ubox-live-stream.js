@@ -1155,7 +1155,8 @@ class UBoxLiveStreamSession {
     payload[0x00] = 1;
     payload[0x01] = s.relayMode & 0xff;
     payload[0x03] = s.seqByte & 0xff;
-    // Preserve direct-server hints that helped earlier captures when native source fields are still unknown.
+    // FIXME(native): p4p_client_send_rlystreamreq fills these from pP4PMgmt
+    // source-address fields, not from Node's 0.0.0.0-bound socket.
     payload[0x0c] = 0x0a;
     payload[0x0e] = 0x02;
     payload[0x0f] = 0x0f;
@@ -1970,7 +1971,7 @@ class UBoxLiveStreamSession {
     this.kcp = new Kcp(conv, { session: this });
     this.kcp.setMtu(0x518);
     this.kcp.setNoDelay(1, 10, 0, 1);
-    this.kcp.setWndSize(0x80, 0x200);
+    this.kcp.setWndSize(0x80, 0x100);
     this.kcp.rx_minrto = 0x0c;
     this.kcp.nocwnd = 0;
     this.kcp.setOutput((data, size) => this.sendKcpOutput(data, size));
