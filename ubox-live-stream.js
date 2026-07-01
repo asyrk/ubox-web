@@ -283,19 +283,24 @@ function parseFrameInfo(frameInfo) {
   };
 }
 
-function cleanAnnexB(annexB) {
+// Native forwards callback frame bytes upward; the web bridge only normalizes
+// Annex-B framing and preserves every parsed NAL unit.
+function normalizeAnnexB(annexB) {
   const parts = [];
-  let hasPicture = false;
-  for (const nal of parseNalUnits(annexB)) {
-    const nri = (nal.data[0] >> 5) & 0x03;
-    const isParameterSet = nal.type === 7 || nal.type === 8;
-    const isIdrSlice = nal.type === 5 && nri > 0 && nal.data.length > 32;
-    const isNonIdrSlice = nal.type === 1 && nri > 0 && nal.data.length > 32;
-    if (!isParameterSet && !isIdrSlice && !isNonIdrSlice) continue;
-    if (isIdrSlice || isNonIdrSlice) hasPicture = true;
+  const nals = parseNalUnits(annexB);
+  if (!nals.length) return null;
+  for (const nal of nals) {
     parts.push(Buffer.from([0, 0, 0, 1]), nal.data);
   }
-  return hasPicture && parts.length ? Buffer.concat(parts) : null;
+  return Buffer.concat(parts);
+}
+
+function summarizeNalUnits(annexB) {
+  const counts = {};
+  for (const nal of parseNalUnits(annexB)) {
+    counts[nal.type] = (counts[nal.type] || 0) + 1;
+  }
+  return counts;
 }
 
 function framePacket(frame) {
@@ -704,6 +709,7 @@ class UBoxLiveStreamSession {
       mp4Fragments: 0,
       h264Clients: 0,
       h264Frames: 0,
+      h264DroppedFrames: 0,
       kcpGapDrops: 0,
       kcpInputErrors: 0,
       kcpOutputPackets: 0,
@@ -2131,13 +2137,27 @@ class UBoxLiveStreamSession {
       fs.appendFileSync(this.dumpFile, annexB);
       this.counters.annexBFrames += 1;
       this.counters.bytesWritten += annexB.length;
-      const clean = cleanAnnexB(annexB);
+      const clean = normalizeAnnexB(annexB);
       if (clean) {
         // Native OnLiveVideoStateCallback only routes cam_index to sensor1 for
         // DeviceUtil.is2CameraSendSor(), i.e. vrexttype 8 or 9.
         const track = isNativeTwoSensorDevice(this.identity) && meta.frameMeta?.cam === 1 ? "secondary" : "primary";
         this.broadcastH264(clean, track);
         if (track === "primary") this.broadcastMp4(clean);
+      } else {
+        this.counters.h264DroppedFrames += 1;
+        if (this.counters.h264DroppedFrames <= 5 || this.counters.h264DroppedFrames % 30 === 0) {
+          this.manager.emit("h264-frame-dropped", {
+            reason: "no-annexb-nals",
+            source: meta.source,
+            streamByte: meta.streamByte,
+            frameSeq: meta.frameSeq,
+            frameMeta: meta.frameMeta,
+            bytes: annexB.length,
+            nalTypes: summarizeNalUnits(annexB),
+            dropped: this.counters.h264DroppedFrames,
+          });
+        }
       }
     }
   }
