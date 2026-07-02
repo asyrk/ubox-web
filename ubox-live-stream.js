@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const { Kcp } = require("kcpjs/dist/kcp");
 const { buildPacket, decodeDatagram, describeMsg, encodeP4P } = require("./p4p-codec");
 const { LiveMp4Muxer, extractAnnexB, parseNalUnits } = require("./live-mp4");
+const { buildWebCodecsCodecString, detectStreamFormat } = require("./video-codec");
 
 const DISCOVERY_SERVERS = [
   "175.178.248.245",
@@ -688,6 +689,8 @@ class UBoxLiveStreamSession {
     };
     this.rdtFrames = new Map();
     this.muxer = new LiveMp4Muxer({ fps: Number(options.fps || 15) });
+    this.streamFormat = null;
+    this.streamCodec = null;
     this.mp4Clients = new Set();
     this.mp4Backlog = [];
     this.h264Tracks = new Map([
@@ -766,7 +769,9 @@ class UBoxLiveStreamSession {
       dumpFile: this.dumpFile,
       logFile: this.logFile,
       mp4Ready: Boolean(this.muxer.initSegment),
-      mp4Codec: this.muxer.codec,
+      mp4Codec: this.muxer.codec || this.streamCodec,
+      streamFormat: this.streamFormat,
+      streamCodec: this.streamCodec,
       mp4Backlog: this.mp4Backlog.length,
       h264Backlog: this.h264Tracks.get("primary").backlog.length,
       h264Tracks: Object.fromEntries([...this.h264Tracks.entries()].map(([track, state]) => [
@@ -2140,6 +2145,19 @@ class UBoxLiveStreamSession {
       this.counters.bytesWritten += annexB.length;
       const clean = normalizeAnnexB(annexB);
       if (clean) {
+        if (!this.streamFormat) {
+          this.streamFormat = detectStreamFormat(clean);
+          if (this.streamFormat) {
+            this.streamCodec = buildWebCodecsCodecString(clean, this.streamFormat);
+            this.manager.emit("stream-codec-learned", {
+              format: this.streamFormat,
+              codec: this.streamCodec,
+              frameMeta: meta.frameMeta,
+            });
+          }
+        } else if (!this.streamCodec) {
+          this.streamCodec = buildWebCodecsCodecString(clean, this.streamFormat);
+        }
         // Native OnLiveVideoStateCallback only routes cam_index to sensor1 for
         // DeviceUtil.is2CameraSendSor(), i.e. vrexttype 8 or 9.
         const track = isNativeTwoSensorDevice(this.identity) && meta.frameMeta?.cam === 1 ? "secondary" : "primary";
@@ -2167,7 +2185,7 @@ class UBoxLiveStreamSession {
     this.lastH264At = Date.now();
     const state = this.h264Track(track);
     state.backlog.push(annexB);
-    state.backlog = state.backlog.slice(-120);
+    state.backlog = state.backlog.slice(-450);
     const packet = framePacket(annexB);
     for (const client of [...state.clients]) {
       try {
