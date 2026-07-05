@@ -410,10 +410,12 @@ function parseRdtBlock(record) {
 }
 
 class UBoxLiveStreamManager {
-  constructor({ dumpDir, logDir, defaultOptions = {} }) {
+  constructor({ dumpDir, logDir, defaultOptions = {}, enableSessionLogs = true, enableDumpFiles = true }) {
     this.dumpDir = dumpDir;
     this.logDir = logDir || path.join(dumpDir, "..", "live-session-logs");
     this.defaultOptions = { ...DEFAULT_STREAM_OPTIONS, ...defaultOptions };
+    this.enableSessionLogs = enableSessionLogs;
+    this.enableDumpFiles = enableDumpFiles;
     this.session = null;
     this.events = [];
     this.sseClients = new Set();
@@ -421,7 +423,9 @@ class UBoxLiveStreamManager {
     this.sessionLogBuffer = [];
     this.sessionLogTimer = null;
     this.restartPromise = null;
-    fs.mkdirSync(this.logDir, { recursive: true });
+    if (this.enableSessionLogs) {
+      fs.mkdirSync(this.logDir, { recursive: true });
+    }
   }
 
   status() {
@@ -487,6 +491,10 @@ class UBoxLiveStreamManager {
   }
 
   openSessionLog(session) {
+    if (!this.enableSessionLogs) {
+      this.sessionLogFile = "";
+      return;
+    }
     this.closeSessionLog();
     fs.mkdirSync(this.logDir, { recursive: true });
     const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeFilePart(session.identity.uid)}-${session.randomId}.jsonl`;
@@ -585,11 +593,13 @@ class UBoxLiveStreamManager {
       });
     }
     await this.stop();
-    fs.mkdirSync(this.dumpDir, { recursive: true });
+    if (this.enableDumpFiles) {
+      fs.mkdirSync(this.dumpDir, { recursive: true });
+    }
     this.session = new UBoxLiveStreamSession({
       identity,
       manager: this,
-      dumpFile: path.join(this.dumpDir, `${identity.uid}-${Date.now()}.h264`),
+      dumpFile: this.enableDumpFiles ? path.join(this.dumpDir, `${identity.uid}-${Date.now()}.h264`) : null,
       options: sessionOptions,
     });
     this.openSessionLog(this.session);
@@ -2140,7 +2150,9 @@ class UBoxLiveStreamSession {
   processVideoPayload(payload, meta = {}) {
     const annexB = extractAnnexB(payload);
     if (annexB) {
-      fs.appendFileSync(this.dumpFile, annexB);
+      if (this.dumpFile) {
+        fs.appendFileSync(this.dumpFile, annexB);
+      }
       this.counters.annexBFrames += 1;
       this.counters.bytesWritten += annexB.length;
       const clean = normalizeAnnexB(annexB);
