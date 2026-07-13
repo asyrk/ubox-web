@@ -1,6 +1,6 @@
 # IMPORTANT
 
-This project was 100% vibecoded. I have not reviewed this code, nor did I code anything that you can see here. I needed a web viewer since there's nothing native, so I asked the AI to do it - and after few days it came up with this. Use at your own risk, I take no responsibility for anything this does, I will not maintain it, I will not accept pull requests.
+This project was 100% vibecoded. I have not reviewed this code, nor did I code anything that you can see here. I needed a web viewer since there's nothing native, so I asked the AI to do it - and after few days it came up with this. Use at your own risk, I take no responsibility for anything this does, I do not plan on actively maintaining it.
 
 I hope this can serve as a base for somebody smarter than me and with more time to spare, to create something universally usable.
 
