@@ -25,6 +25,12 @@ Working:
 - Dual-channel display for devices that expose primary and secondary streams
 - Browser-side H.264 decode through WebCodecs
 - Live diagnostics for bytes/sec, frames/sec, and stream session events
+- PTZ camera controls (pan/tilt directions, speed level, lens zoom) sent as
+  native IO-control commands (`0x1401` / KCP record type 3), with the zoom
+  value read back from the camera (`8483` response) to sync the slider. The
+  panel is shown only for cameras whose `dev_func` bitmask reports PTZ
+  (bit 18 = two-axis, bit 2 = single-axis, same derivation as the app's
+  `DeviceUtil`), and shared cameras need the PTZ permission (`"1"`)
 - Vite HMR development on the same local origin as the backend
 
 Still experimental:
@@ -70,6 +76,7 @@ keeps auth local, and makes stream endpoints simple:
 - `GET /api/stream/live.h264?track=secondary`
 - `GET /api/stream/events`
 - `POST /api/stream/stop`
+- `POST /api/stream/ptz`
 
 ## Architecture
 

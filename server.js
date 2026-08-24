@@ -471,6 +471,13 @@ async function route(req, res) {
       return json(res, 200, liveStreams.status());
     }
 
+    if (req.method === "POST" && url.pathname === "/api/stream/ptz") {
+      await requireSession();
+      const body = await readBody(req);
+      const result = liveStreams.sendPtzCommand(body);
+      return json(res, result.ok ? 200 : 409, result);
+    }
+
     if (req.method === "POST" && url.pathname === "/api/stream/decode-packet") {
       await requireSession();
       const body = await readBody(req);

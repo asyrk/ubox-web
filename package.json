@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "backend": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:ptz": "node ptz-wire-verify.js"
   },
   "dependencies": {
     "kcpjs": "^1.0.12",

@@ -629,6 +629,52 @@ class UBoxLiveStreamManager {
       prefix: decoded.clear.subarray(0, Math.min(decoded.clear.length, 96)).toString("hex"),
     };
   }
+
+  // PTZ/IO-control entry point used by POST /api/stream/ptz. Command semantics
+  // mirror the decompiled Android app (AdvancedSettings.setPtzLevel /
+  // setLensZoom / getLensZoom):
+  //   move  { direction: "up"|"down"|"left"|"right", speed: 1|2|3 } -> 4097
+  //   stop  { speed: 1|2|3 }                                       -> 4097 dir 0
+  //   zoom  { zoom: 10..120 }                                      -> 8480
+  //   zoom-get                                                      -> 8482
+  // Every failure reply carries a human-readable `error` so the browser never
+  // falls back to a bare HTTP status message.
+  sendPtzCommand(body = {}) {
+    if (!this.session) {
+      return { ok: false, error: "No live stream is running. Start the stream first." };
+    }
+    const action = body.action;
+    if (action === "move" || action === "stop") {
+      const directions = { up: 1, down: 2, right: 3, left: 6 };
+      const direction = action === "move" ? directions[body.direction] : 0;
+      if (direction === undefined) {
+        return { ok: false, error: "direction must be one of up, down, left, right." };
+      }
+      const speed = Number(body.speed);
+      const allowedSpeed = speed === 1 || speed === 2 || speed === 3 ? speed : 1;
+      const sent = this.session.ptzDirection(direction, allowedSpeed);
+      return sent
+        ? { ok: true, action, direction, speed: allowedSpeed, command: 0x1001 }
+        : { ok: false, error: "The live session is still connecting. Wait a moment and try again.", action, direction, command: 0x1001 };
+    }
+    if (action === "zoom") {
+      const zoom = Math.round(Number(body.zoom));
+      if (!Number.isFinite(zoom) || zoom < 10 || zoom > 120) {
+        return { ok: false, error: "zoom must be an integer between 10 and 120." };
+      }
+      const sent = this.session.ptzZoom(zoom);
+      return sent
+        ? { ok: true, action, zoom, command: 0x2120 }
+        : { ok: false, error: "The live session is still connecting. Wait a moment and try again.", action, command: 0x2120 };
+    }
+    if (action === "zoom-get") {
+      const sent = this.session.ptzGetZoom();
+      return sent
+        ? { ok: true, action, command: 0x2122 }
+        : { ok: false, error: "The live session is still connecting. Wait a moment and try again.", action, command: 0x2122 };
+    }
+    return { ok: false, error: "action must be one of move, stop, zoom, zoom-get." };
+  }
 }
 
 class UBoxLiveStreamSession {
@@ -1548,6 +1594,111 @@ class UBoxLiveStreamSession {
     return this.sendAvControlKcp(payload, reason);
   }
 
+  // Mirrors native p4p_client_send_ioctrl(session, kind, command, payload, len)
+  // (docs/decompiled/libUBICAPIs29/p4p_client_send_ioctrl.c):
+  //   - KCP-ready AV channel  -> KCP inner record type 3
+  //   - otherwise             -> direct P4P 0x1401 with 0x0c envelope
+  // The Android app always sends IO control on channel 0; the web session
+  // mirrors that with the established channel like the AV-control path.
+  sendIoControl(command, payload, reason = "ioctrl") {
+    if (!this.relayEstablished || !this.relayPeer) {
+      this.manager.emit("ioctrl-skipped", {
+        reason,
+        command,
+        relay: Boolean(this.relayPeer),
+        state: this.sessionState.state,
+      });
+      return false;
+    }
+    if (this.kcp) return this.sendIoControlKcp(command, payload, reason);
+    return this.sendIoControlDirect(command, payload, reason);
+  }
+
+  sendIoControlDirect(command, payload, reason) {
+    const s = this.sessionState;
+    const isLanState = s.state === 7 || s.state === 8;
+    const body = Buffer.alloc(0x0c + payload.length);
+    body[0] = 3;
+    body.writeUInt16LE(0, 4);
+    body.writeUInt16LE(payload.length, 6);
+    body.writeUInt32LE(command >>> 0, 8);
+    payload.copy(body, 0x0c);
+    const packet = buildPacket({
+      msg: 0x1401,
+      payload: body,
+      sidOrChannel: s.localSid & 0xffff,
+      msgLen: isLanState ? 0x21 : 0x24,
+      seqOrParam: isLanState ? s.peerSidByte & 0xffff : s.peerValue0a & 0xffff,
+      kind: this.channel & 0xff,
+    });
+    this.send(this.relayPeer.address, this.relayPeer.port, packet, true);
+    this.manager.emit("ioctrl-sent", {
+      reason,
+      command,
+      via: "p4p",
+      to: `${this.relayPeer.address}:${this.relayPeer.port}`,
+      sid: this.sid,
+      remoteSid: this.remoteSid,
+      bytes: payload.length,
+      envelopePrefix: body.subarray(0, 0x0c).toString("hex"),
+    });
+    return true;
+  }
+
+  sendIoControlKcp(command, payload, reason) {
+    if (!this.kcp) return false;
+    const record = Buffer.alloc(0x10 + payload.length);
+    record.writeUInt16LE(3, 0);
+    record[2] = this.channel & 0xff;
+    record[3] = 0;
+    record.writeUInt16LE(0, 4);
+    record.writeUInt16LE(0, 6);
+    record.writeUInt32LE(payload.length, 8);
+    record.writeUInt32LE(command >>> 0, 0x0c);
+    payload.copy(record, 0x10);
+    const ret = this.kcp.send(record);
+    this.kcp.flush(false);
+    this.manager.emit("ioctrl-sent", {
+      reason,
+      command,
+      via: "kcp",
+      ret,
+      bytes: record.length,
+      sid: this.sid,
+      remoteSid: this.remoteSid,
+      conv: this.kcpConv,
+    });
+    return ret >= 0;
+  }
+
+  // setPtzLevel(direction, speed) from com/apiv3/bean/AdvancedSettings.java:
+  // 12-byte payload, [5]=direction, [6]=8, [10]=speed; command 4097
+  // (IOTYPE_USER_IPCAM_PTZ_COMMAND_REQ). Directions used by the app UI:
+  // 1=up, 2=down, 3=right, 6=left, 0=stop.
+  ptzDirection(direction, speed) {
+    const payload = Buffer.alloc(12);
+    payload[5] = direction & 0xff;
+    payload[6] = 8;
+    payload[10] = speed & 0xff;
+    return this.sendIoControl(0x1001, payload, `ptz-direction-${direction}`);
+  }
+
+  // setLensZoom(zoom) from AdvancedSettings.java: 20-byte payload with u32 LE
+  // zoom at [0]; command 8480 (IOTYPE_USER_IPCAM_SET_LENS_ZOOM_REQ). The app
+  // sends 10..usAfLensZoomMax in steps of 10 (slider position = zoom/10 - 1).
+  ptzZoom(zoom) {
+    const payload = Buffer.alloc(20);
+    payload.writeUInt32LE(zoom >>> 0, 0);
+    return this.sendIoControl(0x2120, payload, "ptz-zoom");
+  }
+
+  // getLensZoom() from AdvancedSettings.java: empty 20-byte payload;
+  // command 8482 (IOTYPE_USER_IPCAM_GET_LENS_ZOOM_REQ). The camera answers
+  // 8483 with the current zoom as u32 LE, which syncs the web slider.
+  ptzGetZoom() {
+    return this.sendIoControl(0x2122, Buffer.alloc(20), "ptz-zoom-get");
+  }
+
   sendLogoutRequest(reason = "logout") {
     if (!this.relayPeer || !this.sessionState.active) return false;
     const s = this.sessionState;
@@ -1786,6 +1937,17 @@ class UBoxLiveStreamSession {
     } else if (header.msg === 0x1404) {
       this.resetLiveCount("rdt");
       this.handleRdtDatagram(payload, header, rinfo);
+    } else if (header.msg === 0x1402) {
+      this.resetLiveCount("ioctrl-rsp");
+      // Native p4p_client_handle_ioctrl forwards the envelope unchanged:
+      // command = u32 at payload+0x08, data at payload+0x0c, len = u16 at +0x06.
+      if (payload.length >= 0x0c) {
+        const command = payload.readUInt32LE(0x08);
+        const dataLength = Math.min(payload.readUInt16LE(0x06), payload.length - 0x0c);
+        this.handleIoCtrlResponse(command, payload.subarray(0x0c, 0x0c + dataLength), { via: "p4p", from: `${rinfo.address}:${rinfo.port}` });
+      } else {
+        this.manager.emit("ioctrl-rsp-short", { bytes: payload.length, prefix: payload.toString("hex") });
+      }
     } else if (header.msg === 0x1409) {
       this.resetLiveCount("kcp");
       const kcpBytes = clear.subarray(16, 16 + header.length);
@@ -2123,6 +2285,24 @@ class UBoxLiveStreamSession {
   handleKcpMessage(message) {
     this.counters.kcpMessages += 1;
     this.lastKcpMessageAt = Date.now();
+    if (message.length < 0x10) {
+      this.manager.emit("kcp-message", { bytes: message.length, parsed: false });
+      return;
+    }
+    const recordType = message.readUInt16LE(0);
+    // IO-control records (type 3 request / type 4 response): layout from
+    // p4p_video_client_kcp_recv.c - +0x08 u32 payload_len, +0x0c u32 command,
+    // +0x10 data. Native only accepts payload_len + 0x10 <= received bytes.
+    if (recordType === 3 || recordType === 4) {
+      const payloadLen = message.readUInt32LE(0x08);
+      if (payloadLen + 0x10 > message.length) {
+        this.manager.emit("kcp-message", { bytes: message.length, parsed: false, reason: "ioctrl-record-truncated" });
+        return;
+      }
+      const command = message.readUInt32LE(0x0c);
+      this.handleIoCtrlResponse(command, message.subarray(0x10, 0x10 + payloadLen), { via: "kcp", recordType });
+      return;
+    }
     const record = parseInnerRecord(message);
     if (!record) {
       this.manager.emit("kcp-message", { bytes: message.length, parsed: false });
@@ -2144,6 +2324,26 @@ class UBoxLiveStreamSession {
     if (isVideo) {
       this.counters.videoFrames += 1;
       this.processVideoPayload(record.payload, { source: "kcp", streamByte: record.streamByte, frameSeq: record.frameSeq, frameMeta: record.frameMeta });
+    }
+  }
+
+  handleIoCtrlResponse(command, data, meta = {}) {
+    const event = {
+      command,
+      via: meta.via,
+      recordType: meta.recordType,
+      bytes: data.length,
+      prefix: data.subarray(0, 16).toString("hex"),
+      sid: this.sid,
+      remoteSid: this.remoteSid,
+    };
+    if (command === 8483 && data.length >= 4) {
+      // IOTYPE_USER_IPCAM_GET_LENS_ZOOM_RESP: current zoom as u32 LE;
+      // the app maps slider progress = zoom/10 - 1 (LiveViewNew2 case 8483).
+      event.zoom = data.readUInt32LE(0);
+      this.manager.emit("lens-zoom-rsp", event);
+    } else {
+      this.manager.emit("ioctrl-rsp", event);
     }
   }
 
@@ -2243,6 +2443,7 @@ class UBoxLiveStreamSession {
 
 module.exports = {
   UBoxLiveStreamManager,
+  UBoxLiveStreamSession,
   getDeviceIdentity,
   parseInnerRecord,
   parseKcpSegments,

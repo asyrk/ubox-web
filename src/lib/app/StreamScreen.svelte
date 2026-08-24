@@ -3,6 +3,7 @@
   import * as Card from "$lib/components/ui/card/index.js";
   import CameraPane from "./CameraPane.svelte";
   import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
+  import PtzControls from "./PtzControls.svelte";
   import StreamQualitySwitch from "./StreamQualitySwitch.svelte";
 
   export let selectedDevice;
@@ -20,6 +21,8 @@
   export let chartXDomain;
   export let streamIndex = 0;
   export let showSecondaryStream = false;
+  export let lensZoomReport = null;
+  export let streamEstablished = false;
   export let onStartLive;
   export let onStopLive;
   export let onSetStreamIndex;
@@ -29,6 +32,14 @@
 
   $: liveButtonLabel = streamRunning ? "Stop" : "Start";
   $: liveButtonAction = streamRunning ? onStopLive : onStartLive;
+
+  // PTZ capability comes from the device function bitmask (dev_func), same
+  // derivation as the decompiled app (DeviceUtil): function[18] -> ptz 2,
+  // function[2] -> ptz 1, else no PTZ. Shared cameras additionally need the
+  // "1" (ptz) permission unless owned.
+  $: ptzSupport = selectedDevice?.ptzSupport || "none";
+  $: ptzAvailable = ptzSupport !== "none" && selectedDevice?.ptzPermission !== false;
+  $: ptzEnabled = streamRunning && ptzAvailable;
 </script>
 
 <div class="stream-layout">
@@ -54,6 +65,15 @@
           <Button onclick={liveButtonAction} disabled={busy}>{liveButtonLabel}</Button>
         </div>
       </div>
+
+      {#if ptzAvailable || streamRunning}
+        <PtzControls
+          enabled={ptzEnabled}
+          supported={ptzAvailable}
+          {streamEstablished}
+          {lensZoomReport}
+        />
+      {/if}
     </Card.Content>
   </Card.Root>
 

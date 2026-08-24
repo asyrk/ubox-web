@@ -24,6 +24,9 @@ export function flattenDevices(reply) {
     owner: item.is_owner,
     source: "items",
     raw: item,
+    devFunc: numberField(item.dev_func),
+    ptzSupport: computePtzSupport(item),
+    ptzPermission: hasPtzPermission(item),
   }));
   const fromInfos = (data.infos || []).map((info) => ({
     uid: info.device_uid,
@@ -31,6 +34,9 @@ export function flattenDevices(reply) {
     owner: info.is_owner,
     source: "infos",
     raw: info,
+    devFunc: numberField(info.dev_func),
+    ptzSupport: computePtzSupport(info),
+    ptzPermission: hasPtzPermission(info),
   }));
 
   const merged = new Map();
@@ -39,4 +45,32 @@ export function flattenDevices(reply) {
     merged.set(device.uid, { ...(merged.get(device.uid) || {}), ...device });
   }
   return [...merged.values()];
+}
+
+function numberField(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed >>> 0 : 0;
+}
+
+// PTZ capability from the device function bitmask, mirroring the decompiled
+// app (DeviceUtil.getFunction + the ptz rules in DeviceUtil.java):
+//   function[i] = (dev_func >> i) & 1
+//   function[18] == 1 -> ptz = 2 (two-axis pan/tilt)
+//   function[2]  == 1 -> ptz = 1 (single-axis)
+//   otherwise          -> ptz = 0 (no PTZ)
+function computePtzSupport(item) {
+  const value = numberField(item?.dev_func);
+  const hasBit = (index) => ((value >>> index) & 1) === 1;
+  if (hasBit(18)) return "ptz2";
+  if (hasBit(2)) return "ptz1";
+  return "none";
+}
+
+// PTZ permission from the shared-device permissions string, mirroring
+// PermissionUtil.isPermission: owner, or no permissions, or permissions
+// contains "1" (permission_ptz).
+function hasPtzPermission(item) {
+  if (Number(item?.is_owner ?? item?.owner ?? 0) === 1) return true;
+  const permissions = item?.permissions;
+  return permissions == null || String(permissions).includes("1");
 }

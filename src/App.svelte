@@ -57,6 +57,8 @@
 
   let cam0Canvas;
   let cam1Canvas;
+  let lensZoomReport = null;
+  let streamEstablished = false;
 
   function normalizeUiStreamIndex(value) {
     return Number(value) === 1 ? 1 : 0;
@@ -131,12 +133,21 @@
         log("stream", detail.event || "event", detail);
         if (detail.event === "relay-stream-rsp") {
           captureStatus = `Relay stream opened: sid ${detail.sid}, channel ${detail.channel}.`;
+          streamEstablished = true;
         }
         if (detail.event === "h264-frame") {
           captureStatus = `Live H.264: ${detail.backlog || 0} frame(s) buffered, ${detail.clients || 0} client(s).`;
         }
         if (detail.event === "mp4-fragment") {
           captureStatus = `Live MP4: ${detail.codec || "codec pending"}, ${detail.clients || 0} client(s), last fragment ${detail.bytes} bytes.`;
+        }
+        if (detail.event === "lens-zoom-rsp") {
+          lensZoomReport = { zoom: detail.zoom, at: Date.now() };
+        }
+        // A reused session is already connected but does not emit
+        // relay-stream-rsp again.
+        if (detail.event === "session-reused") {
+          streamEstablished = true;
         }
       } catch {
         log("stream", "event", { raw: event.data });
@@ -145,7 +156,13 @@
 
     streamEvents.addEventListener("snapshot", (event) => {
       try {
-        log("stream", "snapshot", JSON.parse(event.data));
+        const detail = JSON.parse(event.data);
+        log("stream", "snapshot", detail);
+        // sessionState.state 6 means the relay session is established
+        // (UBoxLiveStreamSession sets state 6 + relayEstablished on 0x1206).
+        if (detail?.session?.sessionState?.state === 6) {
+          streamEstablished = true;
+        }
       } catch {
         log("stream", "snapshot", { raw: event.data });
       }
@@ -221,6 +238,7 @@
     }
 
     liveServerActive = false;
+    streamEstablished = false;
     livePlayback.stop();
     disconnectStreamEvents();
     await api("/api/logout", { method: "POST", body: "{}" });
@@ -267,6 +285,9 @@
       isTwoSensor: cameraLayout.isTwoSensor,
       isT23ThreeEye: cameraLayout.isT23ThreeEye,
       showSecondaryStream: cameraLayout.showSecondaryStream,
+      ptzSupport: device.ptzSupport,
+      ptzPermission: device.ptzPermission,
+      devFunc: device.devFunc,
     });
   }
 
@@ -275,6 +296,7 @@
     busy = true;
     connectStreamEvents();
     resetStreamMetrics();
+    streamEstablished = false;
     setStatus(`Starting ${streamQualityLabel(streamIndex)} live stream decoder...`);
 
     try {
@@ -345,6 +367,7 @@
     try {
       const reply = await api("/api/stream/stop", { method: "POST", body: "{}" });
       liveServerActive = false;
+      streamEstablished = false;
       livePlayback.stop();
       clearCanvases();
       captureStatus = "Live stream decoder stopped.";
@@ -367,6 +390,7 @@
         log("stream", "change-device-stop-error", { message: error.message });
       }
     }
+    streamEstablished = false;
     screen = STEPS.DEVICES;
   }
 
@@ -469,6 +493,8 @@
       {chartXDomain}
       {streamIndex}
       {showSecondaryStream}
+      {lensZoomReport}
+      {streamEstablished}
       onStartLive={startLiveDecode}
       onStopLive={stopLiveDecode}
       onSetStreamIndex={setStreamIndex}
