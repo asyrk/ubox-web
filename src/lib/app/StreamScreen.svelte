@@ -33,10 +33,7 @@
   $: liveButtonLabel = streamRunning ? "Stop" : "Start";
   $: liveButtonAction = streamRunning ? onStopLive : onStartLive;
 
-  // PTZ capability comes from the device function bitmask (dev_func), same
-  // derivation as the decompiled app (DeviceUtil): function[18] -> ptz 2,
-  // function[2] -> ptz 1, else no PTZ. Shared cameras additionally need the
-  // "1" (ptz) permission unless owned.
+  // PTZ capability from dev_func; shared cameras need the ptz permission.
   $: ptzSupport = selectedDevice?.ptzSupport || "none";
   $: ptzAvailable = ptzSupport !== "none" && selectedDevice?.ptzPermission !== false;
   $: ptzEnabled = streamRunning && ptzAvailable;

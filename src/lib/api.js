@@ -52,12 +52,7 @@ function numberField(value) {
   return Number.isFinite(parsed) ? parsed >>> 0 : 0;
 }
 
-// PTZ capability from the device function bitmask, mirroring the decompiled
-// app (DeviceUtil.getFunction + the ptz rules in DeviceUtil.java):
-//   function[i] = (dev_func >> i) & 1
-//   function[18] == 1 -> ptz = 2 (two-axis pan/tilt)
-//   function[2]  == 1 -> ptz = 1 (single-axis)
-//   otherwise          -> ptz = 0 (no PTZ)
+// dev_func bit 18 -> two-axis, bit 2 -> single-axis (app DeviceUtil).
 function computePtzSupport(item) {
   const value = numberField(item?.dev_func);
   const hasBit = (index) => ((value >>> index) & 1) === 1;
@@ -66,9 +61,7 @@ function computePtzSupport(item) {
   return "none";
 }
 
-// PTZ permission from the shared-device permissions string, mirroring
-// PermissionUtil.isPermission: owner, or no permissions, or permissions
-// contains "1" (permission_ptz).
+// Owner or permissions containing "1" (app PermissionUtil).
 function hasPtzPermission(item) {
   if (Number(item?.is_owner ?? item?.owner ?? 0) === 1) return true;
   const permissions = item?.permissions;

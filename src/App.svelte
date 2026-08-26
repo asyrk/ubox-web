@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import AppHeader from "./lib/app/AppHeader.svelte";
+  import CloudVideosScreen from "./lib/app/CloudVideosScreen.svelte";
   import DeviceSelection from "./lib/app/DeviceSelection.svelte";
   import LoginScreen from "./lib/app/LoginScreen.svelte";
   import StreamScreen from "./lib/app/StreamScreen.svelte";
@@ -21,6 +22,7 @@
     LOGIN: "login",
     DEVICES: "devices",
     STREAM: "stream",
+    CLOUD: "cloud",
   };
 
   let screen = STEPS.LOGIN;
@@ -144,8 +146,7 @@
         if (detail.event === "lens-zoom-rsp") {
           lensZoomReport = { zoom: detail.zoom, at: Date.now() };
         }
-        // A reused session is already connected but does not emit
-        // relay-stream-rsp again.
+        // Reused sessions do not re-emit relay-stream-rsp.
         if (detail.event === "session-reused") {
           streamEstablished = true;
         }
@@ -158,8 +159,7 @@
       try {
         const detail = JSON.parse(event.data);
         log("stream", "snapshot", detail);
-        // sessionState.state 6 means the relay session is established
-        // (UBoxLiveStreamSession sets state 6 + relayEstablished on 0x1206).
+        // state 6 = relay established.
         if (detail?.session?.sessionState?.state === 6) {
           streamEstablished = true;
         }
@@ -461,7 +461,15 @@
 </script>
 
 <main class="app-shell">
-  <AppHeader {screen} steps={STEPS} {status} {statusTone} onLogout={logout} onChangeDevice={changeDevice} />
+  <AppHeader
+    {screen}
+    steps={STEPS}
+    {status}
+    {statusTone}
+    onLogout={logout}
+    onChangeDevice={changeDevice}
+    onOpenCloud={() => (screen = STEPS.CLOUD)}
+  />
 
   {#if screen === STEPS.LOGIN}
     <LoginScreen
@@ -476,6 +484,12 @@
     />
   {:else if screen === STEPS.DEVICES}
     <DeviceSelection {devices} {busy} onRefresh={loadDevices} onSelect={selectDevice} />
+  {:else if screen === STEPS.CLOUD}
+    <CloudVideosScreen
+      {devices}
+      initialUid={selectedDevice?.uid || null}
+      onBack={() => (screen = selectedDevice ? STEPS.STREAM : STEPS.DEVICES)}
+    />
   {:else}
     <StreamScreen
       {selectedDevice}

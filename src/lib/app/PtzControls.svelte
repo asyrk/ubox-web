@@ -2,28 +2,12 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import { api } from "$lib/api.js";
 
-  // Camera PTZ controls. Command values mirror the decompiled Android app:
-  //   - AdvancedSettings.setPtzLevel(direction, speed): 12-byte payload,
-  //     direction byte at [5] (1=up, 2=down, 3=right, 6=left, 0=stop),
-  //     [6]=8, speed byte at [10]; IO command 4097.
-  //   - AdvancedSettings.setLensZoom(zoom): u32 LE zoom in a 20-byte payload;
-  //     IO command 8480. The app sends 10..usAfLensZoomMax in steps of 10
-  //     (slider tick = zoom/10 - 1). usAfLensZoomMax defaults to 120 when the
-  //     device reports none.
-  //   - AdvancedSettings.getLensZoom(): empty 20-byte payload; IO command 8482.
-  //     The camera answers 8483 with the current zoom (u32 LE), which the
-  //     backend forwards to the browser as a "lens-zoom-rsp" SSE event.
-  // Hold behavior mirrors PtzFragmentNew.ptzOnTouchListener: move is sent on
-  // touch-down and repeated every 300 ms while held; on release, a touch
-  // shorter than 1000 ms stops after a 500 ms delay, a longer one stops
-  // immediately.
-
   export let enabled = false;
   export let supported = true; // device function bitmask reports PTZ capability
   export let streamEstablished = false; // relay-stream-rsp seen over SSE
   export let lensZoomReport = null; // { zoom, at } from the backend SSE stream
 
-  const DIRECTIONS = { up: 1, down: 2, left: 6, right: 3 };
+  const DIRECTIONS = { up: 1, down: 2, left: 6, right: 3 }; // app direction codes
   const DIRECTION_ORDER = ["up", "left", "right", "down"];
   const SPEED_OPTIONS = [
     { value: 1, label: "Low" },
@@ -69,8 +53,7 @@
     }
   }
 
-  // Keep the panel readable: never surface a bare HTTP status like "409" -
-  // map it to what it actually means (relay/session not established yet).
+  // Map bare HTTP statuses (e.g. 409) to a readable message.
   function friendlyError(message) {
     const text = String(message || "");
     if (/409|still connecting|not ready/i.test(text)) {
@@ -119,14 +102,12 @@
     if (!activeDirection) return;
     clearTimers();
     const heldMs = Date.now() - holdStartedAt;
-    const direction = activeDirection;
     activeDirection = null;
     if (heldMs < TAP_MS) {
       stopTimer = setTimeout(() => sendStop(), STOP_DELAY_MS);
     } else {
       sendStop();
     }
-    if (feedbackTone === "neutral") setFeedback(`Stopped ${direction}.`);
   }
 
   function onDirectionCancel() {
@@ -135,8 +116,7 @@
 
   function setSpeed(nextSpeed) {
     speed = nextSpeed;
-    // The app re-sends a stop command with the new speed level so the camera
-    // applies it to the next move (PtzFragmentNew speed dialog onClick).
+    // Stop with the new speed applies it to the next move.
     sendPtz({ action: "stop", speed });
   }
 
@@ -156,8 +136,7 @@
 
   function requestZoom() {
     if (!enabled) return;
-    // Background sync: keep it quiet - a failure just means the relay is not
-    // up yet; the slider still syncs once the stream is established.
+    // Background sync - keep quiet.
     sendPtz({ action: "zoom-get" }, { silent: true });
   }
 
@@ -169,15 +148,13 @@
     sendZoom();
   }
 
-  // Sync the slider when the camera reports its zoom (SSE lens-zoom-rsp).
   $: if (lensZoomReport && lensZoomReport.at !== requestZoomAt && Number.isFinite(lensZoomReport.zoom)) {
     requestZoomAt = lensZoomReport.at;
     const reportedZoom = clamp(Math.round(lensZoomReport.zoom), ZOOM_MIN, ZOOM_MAX);
     zoomTick = Math.round(reportedZoom / 10) - 1;
   }
 
-  // The app reads the lens zoom only once the live view is up; mirror that by
-  // waiting for the relay-stream-rsp SSE event instead of the start request.
+  // Read zoom once the relay is established.
   $: if (enabled && supported && streamEstablished) requestZoom();
 </script>
 

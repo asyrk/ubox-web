@@ -630,15 +630,8 @@ class UBoxLiveStreamManager {
     };
   }
 
-  // PTZ/IO-control entry point used by POST /api/stream/ptz. Command semantics
-  // mirror the decompiled Android app (AdvancedSettings.setPtzLevel /
-  // setLensZoom / getLensZoom):
-  //   move  { direction: "up"|"down"|"left"|"right", speed: 1|2|3 } -> 4097
-  //   stop  { speed: 1|2|3 }                                       -> 4097 dir 0
-  //   zoom  { zoom: 10..120 }                                      -> 8480
-  //   zoom-get                                                      -> 8482
-  // Every failure reply carries a human-readable `error` so the browser never
-  // falls back to a bare HTTP status message.
+  // POST /api/stream/ptz; commands mirror AdvancedSettings (4097/8480/8482).
+  // Every failure returns a readable `error` (no bare HTTP status).
   sendPtzCommand(body = {}) {
     if (!this.session) {
       return { ok: false, error: "No live stream is running. Start the stream first." };
@@ -1594,12 +1587,7 @@ class UBoxLiveStreamSession {
     return this.sendAvControlKcp(payload, reason);
   }
 
-  // Mirrors native p4p_client_send_ioctrl(session, kind, command, payload, len)
-  // (docs/decompiled/libUBICAPIs29/p4p_client_send_ioctrl.c):
-  //   - KCP-ready AV channel  -> KCP inner record type 3
-  //   - otherwise             -> direct P4P 0x1401 with 0x0c envelope
-  // The Android app always sends IO control on channel 0; the web session
-  // mirrors that with the established channel like the AV-control path.
+  // Mirrors native p4p_client_send_ioctrl: KCP record type 3 or direct 0x1401.
   sendIoControl(command, payload, reason = "ioctrl") {
     if (!this.relayEstablished || !this.relayPeer) {
       this.manager.emit("ioctrl-skipped", {
@@ -1671,10 +1659,7 @@ class UBoxLiveStreamSession {
     return ret >= 0;
   }
 
-  // setPtzLevel(direction, speed) from com/apiv3/bean/AdvancedSettings.java:
-  // 12-byte payload, [5]=direction, [6]=8, [10]=speed; command 4097
-  // (IOTYPE_USER_IPCAM_PTZ_COMMAND_REQ). Directions used by the app UI:
-  // 1=up, 2=down, 3=right, 6=left, 0=stop.
+  // AdvancedSettings.setPtzLevel: command 4097, dirs 1=up 2=down 3=right 6=left 0=stop.
   ptzDirection(direction, speed) {
     const payload = Buffer.alloc(12);
     payload[5] = direction & 0xff;
@@ -1683,18 +1668,14 @@ class UBoxLiveStreamSession {
     return this.sendIoControl(0x1001, payload, `ptz-direction-${direction}`);
   }
 
-  // setLensZoom(zoom) from AdvancedSettings.java: 20-byte payload with u32 LE
-  // zoom at [0]; command 8480 (IOTYPE_USER_IPCAM_SET_LENS_ZOOM_REQ). The app
-  // sends 10..usAfLensZoomMax in steps of 10 (slider position = zoom/10 - 1).
+  // AdvancedSettings.setLensZoom: command 8480, zoom 10..120.
   ptzZoom(zoom) {
     const payload = Buffer.alloc(20);
     payload.writeUInt32LE(zoom >>> 0, 0);
     return this.sendIoControl(0x2120, payload, "ptz-zoom");
   }
 
-  // getLensZoom() from AdvancedSettings.java: empty 20-byte payload;
-  // command 8482 (IOTYPE_USER_IPCAM_GET_LENS_ZOOM_REQ). The camera answers
-  // 8483 with the current zoom as u32 LE, which syncs the web slider.
+  // AdvancedSettings.getLensZoom: command 8482.
   ptzGetZoom() {
     return this.sendIoControl(0x2122, Buffer.alloc(20), "ptz-zoom-get");
   }
@@ -1939,7 +1920,6 @@ class UBoxLiveStreamSession {
       this.handleRdtDatagram(payload, header, rinfo);
     } else if (header.msg === 0x1402) {
       this.resetLiveCount("ioctrl-rsp");
-      // Native p4p_client_handle_ioctrl forwards the envelope unchanged:
       // command = u32 at payload+0x08, data at payload+0x0c, len = u16 at +0x06.
       if (payload.length >= 0x0c) {
         const command = payload.readUInt32LE(0x08);
@@ -2290,9 +2270,7 @@ class UBoxLiveStreamSession {
       return;
     }
     const recordType = message.readUInt16LE(0);
-    // IO-control records (type 3 request / type 4 response): layout from
-    // p4p_video_client_kcp_recv.c - +0x08 u32 payload_len, +0x0c u32 command,
-    // +0x10 data. Native only accepts payload_len + 0x10 <= received bytes.
+    // IO-control records (type 3/4): len +0x08, command +0x0c, data +0x10.
     if (recordType === 3 || recordType === 4) {
       const payloadLen = message.readUInt32LE(0x08);
       if (payloadLen + 0x10 > message.length) {
@@ -2338,8 +2316,7 @@ class UBoxLiveStreamSession {
       remoteSid: this.remoteSid,
     };
     if (command === 8483 && data.length >= 4) {
-      // IOTYPE_USER_IPCAM_GET_LENS_ZOOM_RESP: current zoom as u32 LE;
-      // the app maps slider progress = zoom/10 - 1 (LiveViewNew2 case 8483).
+      // 8483: current zoom as u32 LE.
       event.zoom = data.readUInt32LE(0);
       this.manager.emit("lens-zoom-rsp", event);
     } else {

@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { buildMp4FromAnnexB } = require("./h264-mp4");
+const { extractTrack } = require("./cloud-mp4");
 const { UBoxLiveStreamManager } = require("./ubox-live-stream");
 
 const HOST = "127.0.0.1";
@@ -194,6 +195,61 @@ async function ubiaPost(apiPath, body, options = {}) {
     throw error;
   }
   return parsed;
+}
+
+// Cloud-video API calls mirror the decompiled app (NewApiHttpClient):
+//   POST /api/user/event_calendar      - days with recordings for a month
+//   POST /api/user/cloud_list          - recordings for a time range
+//   POST /api/user/get_cloud_video_url - signed playback URL
+async function cloudPost(apiPath, body, options = {}) {
+  const current = await requireSession();
+  return ubiaPost(apiPath, { token: current.token, ...body }, {
+    token: current.token,
+    uuid: current.uuid,
+    lang: current.lang,
+    region: current.region,
+    ...options,
+  });
+}
+
+// Mirrors LiveCloudListViewModel.getCloudSaveList normalization:
+//   status 1 -> image only; status 4 -> /hdp video path; else /video .mp4
+//   fileName = last path segment; duration = segment[3]; recordTime = date+time.
+function normalizeCloudVideo(item) {
+  const img = item?.img || "";
+  let fileCloudPath = item?.status === 1 ? img : img.replace("/jpg", "/video").replace(".jpg", ".mp4");
+  if (item?.status === 4) fileCloudPath = img.replace("/jpg", "/hdp");
+  const fileName = fileCloudPath.split("/").pop() || "";
+  const parts = fileName.split("_");
+  const duration = parts.length > 3 ? Number(parts[3]) || 0 : 0;
+  const provider = item?.cp === 1 ? "1_amazon" : item?.cp === 2 ? "2_tencent" : "0_aliyun";
+  let recordTime = null;
+  if (parts.length >= 2 && parts[0].length === 8 && parts[1].length === 6) {
+    recordTime = `${parts[0].slice(0, 4)}-${parts[0].slice(4, 6)}-${parts[0].slice(6, 8)} ${parts[1].slice(0, 2)}:${parts[1].slice(2, 4)}:${parts[1].slice(4, 6)}`;
+  }
+  return {
+    id: item?.id,
+    uuid: item?.uuid,
+    uid: item?.device_uid,
+    type: item?.type,
+    status: item?.status,
+    cp: item?.cp,
+    provider,
+    img,
+    fileCloudPath,
+    fileName,
+    duration,
+    recordTime,
+    eventTime: item?.event_time,
+    bucketName: item?.bucket_name,
+    endpoint: item?.end_point,
+    cloud: item?.cloud,
+    realname: item?.realname,
+    cloudImageUrl: item?.cloud_image_url || null,
+    cloudHdImageUrl: item?.cloud_hd_image_url || null,
+    aiFlag: item?.ai_flag,
+    aiFlagString: item?.ai_flag_string,
+  };
 }
 
 function buildLoginPayload(auth) {
@@ -476,6 +532,123 @@ async function route(req, res) {
       const body = await readBody(req);
       const result = liveStreams.sendPtzCommand(body);
       return json(res, result.ok ? 200 : 409, result);
+    }
+
+    // Cloud video: days with recordings for a month (app: user/event_calendar).
+    if (req.method === "POST" && url.pathname === "/api/cloud/calendar") {
+      const body = await readBody(req);
+      if (!body.uid || !body.month) return json(res, 400, { error: "uid and month (YYYY-MM) are required." });
+      const reply = await cloudPost("/api/user/event_calendar", {
+        date: body.month,
+        device_uid: body.uid,
+        time_diff: Number(body.time_diff) || 0,
+      });
+      return json(res, 200, reply);
+    }
+
+    // Cloud video: recordings for a day range (app: user/cloud_list).
+    if (req.method === "POST" && url.pathname === "/api/cloud/list") {
+      const body = await readBody(req);
+      if (!body.uid || !Number.isFinite(Number(body.start)) || !Number.isFinite(Number(body.end))) {
+        return json(res, 400, { error: "uid, start and end (unix seconds) are required." });
+      }
+      const page = Math.max(1, Number(body.page) || 1);
+      const reply = await cloudPost("/api/user/cloud_list", {
+        device_uid: [body.uid],
+        timestamp: [Number(body.start), Number(body.end)],
+        page,
+        time_revised: true,
+        summer_time: Boolean(body.summer_time),
+        time_diff: Number(body.time_diff) || 0,
+      });
+      const data = reply?.data || {};
+      const videos = (data.list || []).filter((item) => [1, 2, 3, 4, 6].includes(item?.status)).map(normalizeCloudVideo);
+      return json(res, 200, {
+        code: reply?.code,
+        msg: reply?.msg,
+        count: data.count || null,
+        cloud: data.cloud,
+        service: data.service,
+        videos,
+      });
+    }
+
+    // Cloud video: signed playback URL (app: user/get_cloud_video_url).
+    if (req.method === "POST" && url.pathname === "/api/cloud/url") {
+      const body = await readBody(req);
+      if (!body.uid || !body.image) return json(res, 400, { error: "uid and image are required." });
+      const reply = await cloudPost("/api/user/get_cloud_video_url", {
+        bucket_name: body.bucketName || "",
+        cloud_provider: body.provider || "0_aliyun",
+        cloud_provider_int: Number(body.cp) || 0,
+        endpoint: body.endpoint || "",
+        guid: body.uuid || "",
+        image: body.image,
+        uid: body.uid,
+      });
+      return json(res, 200, reply);
+    }
+
+    // Cloud video: download proxy (streams the signed URL to the browser).
+    if (req.method === "GET" && url.pathname === "/api/cloud/download") {
+      await requireSession();
+      const target = url.searchParams.get("url") || "";
+      const name = url.searchParams.get("name") || "cloud-video.mp4";
+      if (!/^https?:\/\//.test(target)) return json(res, 400, { error: "invalid url" });
+      let upstream;
+      try {
+        upstream = await fetch(target);
+      } catch {
+        return json(res, 502, { error: "Could not reach the cloud storage URL." });
+      }
+      if (!upstream.ok || !upstream.body) {
+        return json(res, 502, { error: `Cloud storage returned HTTP ${upstream.status}.` });
+      }
+      const safeName = path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_") || "cloud-video.mp4";
+      res.writeHead(200, {
+        "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+        "content-length": upstream.headers.get("content-length"),
+        "content-disposition": `attachment; filename="${safeName}"`,
+      });
+      const { Readable } = require("stream");
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    }
+
+    // Cloud video: single-track demux (two-sensor files carry two video
+    // tracks; browsers only play the first). With `name` it downloads.
+    if (req.method === "GET" && url.pathname === "/api/cloud/track") {
+      await requireSession();
+      const target = url.searchParams.get("url") || "";
+      const track = Number(url.searchParams.get("track")) || 1;
+      const name = url.searchParams.get("name") || "";
+      if (!/^https?:\/\//.test(target)) return json(res, 400, { error: "invalid url" });
+      if (track !== 1 && track !== 2) return json(res, 400, { error: "track must be 1 or 2" });
+      let upstream;
+      try {
+        upstream = await fetch(target);
+      } catch {
+        return json(res, 502, { error: "Could not reach the cloud storage URL." });
+      }
+      if (!upstream.ok) return json(res, 502, { error: `Cloud storage returned HTTP ${upstream.status}.` });
+      const source = Buffer.from(await upstream.arrayBuffer());
+      let out;
+      try {
+        out = extractTrack(source, track);
+      } catch (error) {
+        return json(res, 422, { error: `Could not extract track ${track}: ${error.message}` });
+      }
+      const headers = {
+        "content-type": "video/mp4",
+        "content-length": out.length,
+      };
+      if (name) {
+        const safeName = path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_") || "cloud-video.mp4";
+        headers["content-disposition"] = `attachment; filename="${safeName}"`;
+      }
+      res.writeHead(200, headers);
+      res.end(out);
+      return;
     }
 
     if (req.method === "POST" && url.pathname === "/api/stream/decode-packet") {
