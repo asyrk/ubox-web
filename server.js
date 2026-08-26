@@ -25,9 +25,11 @@ const liveStreams = new UBoxLiveStreamManager({
   logDir: path.join(__dirname, "live-session-logs"),
 });
 
+// Mirrors the app's password hash (LoginViewModel.loginV3 + HttpClient.get_replace_str):
+// HMAC-SHA1 with an empty key, Base64, then "+" -> "-", "/" -> "_", "=" -> ",".
 function hashPassword(password) {
   const digest = crypto.createHmac("sha1", "").update(password).digest("base64");
-  return `${digest.slice(0, -1)},`;
+  return `${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, ",")}`;
 }
 
 function randomToken(length = 30) {
