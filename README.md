@@ -31,6 +31,12 @@ Working:
   panel is shown only for cameras whose `dev_func` bitmask reports PTZ
   (bit 18 = two-axis, bit 2 = single-axis, same derivation as the app's
   `DeviceUtil`), and shared cameras need the PTZ permission (`"1"`)
+- Cloud video playback and download (separate Cloud Videos page): month
+  calendar with days that have recordings (`user/event_calendar`), per-day
+  lists (`user/cloud_list`), and playback/saving through the signed URL from
+  `user/get_cloud_video_url`. Two-sensor cameras record both views as two
+  video tracks in one mp4, so the backend demuxes the requested track
+  (`/api/cloud/track`) and Cam 1 / Cam 2 can be played and saved separately
 - Vite HMR development on the same local origin as the backend
 
 Still experimental:
@@ -77,6 +83,11 @@ keeps auth local, and makes stream endpoints simple:
 - `GET /api/stream/events`
 - `POST /api/stream/stop`
 - `POST /api/stream/ptz`
+- `POST /api/cloud/calendar`
+- `POST /api/cloud/list`
+- `POST /api/cloud/url`
+- `GET /api/cloud/track?url=...&track=1|2[&name=...]`
+- `GET /api/cloud/download?url=...&name=...`
 
 ## Architecture
 
@@ -201,10 +212,12 @@ The frontend decodes those frames with WebCodecs and draws to `<canvas>`.
 ```text
 server.js                  Local HTTP API, auth, static serving, Vite dev middleware
 ubox-live-stream.js        Live relay/P2P session and stream extraction
+cloud-mp4.js               Single-track MP4 demuxer for two-sensor cloud videos
 p4p-codec.js               UBox/P4P packet helpers
 h264-mp4.js, live-mp4.js   MP4/H.264 helpers kept for diagnostics and experiments
 src/App.svelte             App coordinator and session lifecycle
 src/lib/app/               Svelte screen and panel components
+src/lib/app/CloudVideosScreen.svelte  Cloud recording browser/player
 src/lib/livePlayback.js    Browser WebCodecs playback controller
 src/lib/streamMetrics.js   Diagnostics chart bucketing
 src/lib/api.js             Frontend API helpers
