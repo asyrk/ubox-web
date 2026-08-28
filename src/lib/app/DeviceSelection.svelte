@@ -2,6 +2,7 @@
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
+  import DeviceStatus from "./DeviceStatus.svelte";
 
   export let devices = [];
   export let busy = false;
@@ -20,12 +21,21 @@
   <Card.Content class="device-list">
     {#each devices as device}
       <Button class="device-row" variant="outline" type="button" onclick={() => onSelect(device)}>
-        <span>
+        <span class="device-info">
           <strong>{device.name || "Camera"}</strong>
-          <small>{device.uid}</small>
+          <small>{device.uid}{device.modelNum ? ` · Model ${device.modelNum}` : ""}</small>
+          <DeviceStatus {device} />
         </span>
         <Badge variant={device.owner ? "default" : "secondary"}>{device.owner ? "Owner" : "Shared"}</Badge>
       </Button>
     {/each}
   </Card.Content>
 </Card.Root>
+
+<style>
+  .device-info {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+</style>
