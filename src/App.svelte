@@ -47,7 +47,6 @@
   let streamEvents = null;
   let liveServerActive = false;
   let streamIndex = 0;
-  let viewPassword = ""; // optional device view password (relay -2005 fallback)
   let selectedCameraLayout = getNativeCameraLayout(null);
   let showSecondaryStream = false;
 
@@ -151,6 +150,8 @@
         if (detail.event === "session-reused") {
           streamEstablished = true;
         }
+        // Relay view-password rejection (-2005): the session auto-retries the
+        // fallback chain (UID suffix, iotCam31, admin) like the official app.
         if (detail.event === "relay-stream-pwd-retry") {
           setStatus(
             `Relay rejected the view password; retrying with fallback candidate ${detail.candidate}/${detail.candidates}...`,
@@ -159,7 +160,7 @@
         }
         if (detail.event === "relay-stream-pwd-exhausted") {
           setStatus(
-            `Relay rejected the view password (tried ${detail.candidates} candidate(s)). Enter the device view password and restart the stream.`,
+            `Relay rejected the view password (tried ${detail.candidates} candidate(s)).`,
             "danger",
           );
         }
@@ -260,7 +261,6 @@
     devices = [];
     selectedDevice = null;
     streamIndex = 0;
-    viewPassword = "";
     tokenOutput = "";
     playbackLog = [];
     resetStreamMetrics();
@@ -285,7 +285,6 @@
   function selectDevice(device) {
     const cameraLayout = getNativeCameraLayout(device);
     selectedDevice = device;
-    viewPassword = "";
     streamIndex = normalizeUiStreamIndex(device.streamIndex ?? device.raw?.streamindex ?? device.raw?.stream_type ?? 0);
     screen = STEPS.STREAM;
     tokenOutput = "";
@@ -320,10 +319,7 @@
         body: JSON.stringify({
           device: { ...selectedDevice, streamIndex },
           streamIndex,
-          options: {
-            forceRestart,
-            ...(viewPassword ? { viewPassword } : {}),
-          },
+          options: { forceRestart },
         }),
       });
       liveServerActive = true;
@@ -524,14 +520,12 @@
       {byteChartData}
       {chartXDomain}
       {streamIndex}
-      {viewPassword}
       {showSecondaryStream}
       {lensZoomReport}
       {streamEstablished}
       onStartLive={startLiveDecode}
       onStopLive={stopLiveDecode}
       onSetStreamIndex={setStreamIndex}
-      onViewPasswordChange={(value) => (viewPassword = value)}
       onToggleDiagnostics={() => (diagnosticsOpen = !diagnosticsOpen)}
       onClearDiagnostics={() => (playbackLog = [])}
       onSetFrameWindow={setFrameWindow}

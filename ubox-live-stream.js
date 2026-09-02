@@ -392,16 +392,20 @@ function createStartConfig(identity) {
 // The relay/device validates a "view access password" carried in the 0x1205
 // relay-stream request (payload 0x2c, native devLoginPwd slot). On a mismatch
 // the relay answers -2005 (UBICAPIs.CLI_WRONG_VIEWACCPWD). The official app
-// retries with the Ubia factory defaults "iotCam31" then "admin" (see
-// LiveView.defaultPwdA/defaultPwdB in the APK); mirror that here so cameras
-// whose portal device_pwd is empty or stale (e.g. PESAIR DF320 uBox) can
-// still open a stream.
+// never asks the user to type this password: it streams with the cloud list
+// value (device_pwd/cam_pwd), with the UID-derived password it configures on
+// uBox 4G boxes during the wired/QR setup (BoxWireReady:
+// password = uid.substring(12)), and on -2005 it auto-retries the factory
+// defaults "iotCam31" then "admin" (LiveView.defaultPwdA/B). Mirror that
+// candidate chain here so cameras whose portal device_pwd is empty or stale
+// (e.g. PESAIR DF320 uBox) can still open a stream.
 //
 // NOTE: credential naming is historically crossed in this codebase (the
 // identity.loginId field currently carries device_pwd), so the first candidate
 // is the value each 0x1205 builder already puts in the password slot:
 // legacy builder -> identity.loginId, native session-fields builder ->
-// identity.loginPwd. An explicit options.viewPassword always wins.
+// identity.loginPwd. options.viewPassword (used internally when restarting
+// with a pinned candidate) always wins.
 function buildPwdCandidates(identity, options = {}) {
   const explicit =
     options.viewPassword !== undefined &&
@@ -413,8 +417,12 @@ function buildPwdCandidates(identity, options = {}) {
     explicit ||
     (options.enableNativeSessionFields ? identity.loginPwd || "admin" : identity.loginId) ||
     "";
+  // uBox 4G devices configured through the app's setup flow use the UID
+  // suffix (uid.substring(12), the last 8 chars of the 20-char UID) as their
+  // view password.
+  const uidSuffix = String(identity.uid || "").length > 12 ? String(identity.uid).slice(12) : "";
   const candidates = [];
-  for (const candidate of [known, "iotCam31", "admin"]) {
+  for (const candidate of [known, uidSuffix, "iotCam31", "admin"]) {
     if (!candidates.includes(candidate)) candidates.push(candidate);
   }
   return candidates;
@@ -1296,7 +1304,8 @@ class UBoxLiveStreamSession {
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 24);
     // Relay view-password slot (native devLoginPwd @0x2c): candidate 0
     // preserves the historical loginId/device_pwd value; later candidates
-    // retry the -2005 view-password rejection with Ubia factory defaults.
+    // retry the -2005 view-password rejection (UID suffix, then Ubia
+    // factory defaults), mirroring the official app.
     toFixedAsciiBuffer(this.relayPwd, 16).copy(payload, 44);
     payload[66] = this.identity.videoSidSeed & 0xff;
     payload.writeUInt32LE(this.randomId, 72);

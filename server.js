@@ -517,14 +517,6 @@ async function route(req, res) {
       };
       const options = {
         ...(body.options || {}),
-        // Optional device view password. The relay validates it in the 0x1205
-        // request (-2005 CLI_WRONG_VIEWACCPWD) and the session falls back to
-        // the Ubia factory defaults "iotCam31"/"admin" when it is absent.
-        ...(body.viewPassword !== undefined &&
-        body.viewPassword !== null &&
-        String(body.viewPassword).trim() !== ""
-          ? { viewPassword: String(body.viewPassword).trim() }
-          : {}),
         ...(requestedStreamIndex !== undefined ? { streamIndex: requestedStreamIndex } : {}),
       };
       const status = await liveStreams.start(device, options);
