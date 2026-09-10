@@ -150,6 +150,20 @@
         if (detail.event === "session-reused") {
           streamEstablished = true;
         }
+        // Relay view-password rejection (-2005): the session auto-retries the
+        // fallback chain (UID suffix, iotCam31, admin) like the official app.
+        if (detail.event === "relay-stream-pwd-retry") {
+          setStatus(
+            `Relay rejected the view password; retrying with fallback candidate ${detail.candidate}/${detail.candidates}...`,
+            "danger",
+          );
+        }
+        if (detail.event === "relay-stream-pwd-exhausted") {
+          setStatus(
+            `Relay rejected the view password (tried ${detail.candidates} candidate(s)).`,
+            "danger",
+          );
+        }
       } catch {
         log("stream", "event", { raw: event.data });
       }

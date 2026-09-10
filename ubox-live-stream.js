@@ -389,6 +389,45 @@ function createStartConfig(identity) {
   return config;
 }
 
+// The relay/device validates a "view access password" carried in the 0x1205
+// relay-stream request (payload 0x2c, native devLoginPwd slot). On a mismatch
+// the relay answers -2005 (UBICAPIs.CLI_WRONG_VIEWACCPWD). The official app
+// never asks the user to type this password: it streams with the cloud list
+// value (device_pwd/cam_pwd), with the UID-derived password it configures on
+// uBox 4G boxes during the wired/QR setup (BoxWireReady:
+// password = uid.substring(12)), and on -2005 it auto-retries the factory
+// defaults "iotCam31" then "admin" (LiveView.defaultPwdA/B). Mirror that
+// candidate chain here so cameras whose portal device_pwd is empty or stale
+// (e.g. PESAIR DF320 uBox) can still open a stream.
+//
+// NOTE: credential naming is historically crossed in this codebase (the
+// identity.loginId field currently carries device_pwd), so the first candidate
+// is the value each 0x1205 builder already puts in the password slot:
+// legacy builder -> identity.loginId, native session-fields builder ->
+// identity.loginPwd. options.viewPassword (used internally when restarting
+// with a pinned candidate) always wins.
+function buildPwdCandidates(identity, options = {}) {
+  const explicit =
+    options.viewPassword !== undefined &&
+    options.viewPassword !== null &&
+    String(options.viewPassword).trim() !== ""
+      ? String(options.viewPassword).trim()
+      : "";
+  const known =
+    explicit ||
+    (options.enableNativeSessionFields ? identity.loginPwd || "admin" : identity.loginId) ||
+    "";
+  // uBox 4G devices configured through the app's setup flow use the UID
+  // suffix (uid.substring(12), the last 8 chars of the 20-char UID) as their
+  // view password.
+  const uidSuffix = String(identity.uid || "").length > 12 ? String(identity.uid).slice(12) : "";
+  const candidates = [];
+  for (const candidate of [known, uidSuffix, "iotCam31", "admin"]) {
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
+}
+
 function parseRdtBlock(record) {
   if (!record || record.length < 0x18) return null;
   const packetLen = record.readUInt16LE(2);
@@ -554,7 +593,16 @@ class UBoxLiveStreamManager {
     this.restartPromise = (async () => {
       this.emit("session-auto-restart", { sessionId: session.sessionId, reason, ...detail, previous: session.summary() });
       await this.stop();
-      await this.start(session.identity, { ...session.options, forceRestart: true });
+      // Pin the current view-password candidate so a session that already
+      // fell back to a factory default does not replay known-bad passwords.
+      const restartOptions = {
+        ...session.options,
+        forceRestart: true,
+        ...(session.relayPwd && session.relayPwd !== session.options.viewPassword
+          ? { viewPassword: session.relayPwd }
+          : {}),
+      };
+      await this.start(session.identity, restartOptions);
     })()
       .catch((error) => this.emit("session-auto-restart-error", { sessionId: session.sessionId, reason, message: error.message }))
       .finally(() => {
@@ -685,6 +733,14 @@ class UBoxLiveStreamSession {
     this.videoSid = 0;
     this.channel = identity.channel || 0;
     this.startConfig = createStartConfig(identity);
+    // View-password fallback for relay -2005 (CLI_WRONG_VIEWACCPWD): candidate
+    // 0 is the historical value, later candidates are Ubia factory defaults.
+    this.pwdCandidates = buildPwdCandidates(identity, options);
+    this.pwdIndex = 0;
+    this.relayPwd = this.pwdCandidates[0] ?? "";
+    this.pwdSentAt = 0;
+    this.pwdAdvancedAt = null;
+    this.pwdExhaustedEmitted = false;
     this.sessionState = {
       active: true,
       state: 1,
@@ -791,6 +847,9 @@ class UBoxLiveStreamSession {
       uid: this.identity.uid,
       loginIdPresent: Boolean(this.identity.loginId),
       loginPwdPresent: Boolean(this.identity.loginPwd),
+      pwdCandidate: this.pwdIndex,
+      pwdCandidates: this.pwdCandidates.length,
+      pwdExhausted: this.pwdExhaustedEmitted,
       randomId: this.randomId,
       sid: this.sid,
       remoteSid: this.remoteSid,
@@ -1187,6 +1246,7 @@ class UBoxLiveStreamSession {
   sendRelayStreamRequest(address, port, reason = "wakeup-rsp") {
     if (this.relayEstablished) return;
     this.sessionState.state = 3;
+    this.pwdSentAt = Date.now();
     const payload = this.options.enableNativeSessionFields ? this.buildRelayStreamRequestPayload() : this.buildLegacyRelayStreamRequestPayload();
     const packet = buildPacket({ msg: 0x1205, payload, msgLen: 0x24 });
     this.send(address, port, packet, true);
@@ -1196,6 +1256,8 @@ class UBoxLiveStreamSession {
       nativeFields: Boolean(this.options.enableNativeSessionFields),
       loginIdPresent: Boolean(this.identity.loginId),
       loginPwdPresent: Boolean(this.identity.loginPwd),
+      pwdCandidate: this.pwdIndex,
+      pwdCandidates: this.pwdCandidates.length,
       p4pDeviceType: this.identity.deviceType,
       cloudDeviceType: this.identity.cloudDeviceType,
       videoSidSeed: this.identity.videoSidSeed,
@@ -1216,6 +1278,10 @@ class UBoxLiveStreamSession {
     payload[0x0f] = 0x0f;
     s.uid.copy(payload, 0x18, 0, 0x14);
     s.sessionBlob108.copy(payload, 0x2c, 0, 0x14);
+    // View-password override (native devLoginPwd slot). Candidate 0 equals
+    // the config-derived value, so this is a no-op unless a -2005 fallback
+    // candidate is active.
+    toFixedAsciiBuffer(this.relayPwd, 0x14).copy(payload, 0x2c);
     payload[0x41] = s.avKind & 0xff;
     payload[0x42] = s.localSid & 0xff;
     payload.writeUInt32LE(s.randomId >>> 0, 0x48);
@@ -1236,7 +1302,11 @@ class UBoxLiveStreamSession {
     payload[15] = 0x0f;
     payload.writeUInt32LE(crypto.randomBytes(4).readUInt32LE(0) & 0xffff, 16);
     toFixedAsciiBuffer(this.identity.uid, 20).copy(payload, 24);
-    toFixedAsciiBuffer(this.identity.loginId, 16).copy(payload, 44);
+    // Relay view-password slot (native devLoginPwd @0x2c): candidate 0
+    // preserves the historical loginId/device_pwd value; later candidates
+    // retry the -2005 view-password rejection (UID suffix, then Ubia
+    // factory defaults), mirroring the official app.
+    toFixedAsciiBuffer(this.relayPwd, 16).copy(payload, 44);
     payload[66] = this.identity.videoSidSeed & 0xff;
     payload.writeUInt32LE(this.randomId, 72);
     toFixedAsciiBuffer(this.identity.loginPwd || "admin", 20).copy(payload, 76);
@@ -1959,6 +2029,29 @@ class UBoxLiveStreamSession {
       return false;
     }
     if (status !== 0) {
+      // -2005 = UBICAPIs.CLI_WRONG_VIEWACCPWD: the relay/device rejected the
+      // view password carried in the request. Retry with the next candidate
+      // (known value first, then Ubia factory defaults) like the official
+      // app; the 1 s retry timer re-sends 0x1205 with the new candidate.
+      const wrongPassword = status === -2005;
+      const freshRejection = this.pwdAdvancedAt === null || Date.now() - this.pwdAdvancedAt > 500;
+      if (wrongPassword && freshRejection && this.pwdIndex + 1 < this.pwdCandidates.length) {
+        this.pwdIndex += 1;
+        this.relayPwd = this.pwdCandidates[this.pwdIndex];
+        this.pwdAdvancedAt = Date.now();
+        this.manager.emit("relay-stream-pwd-retry", {
+          status,
+          candidate: this.pwdIndex,
+          candidates: this.pwdCandidates.length,
+          state: this.sessionState.state,
+        });
+      } else if (wrongPassword && freshRejection && !this.pwdExhaustedEmitted) {
+        this.pwdExhaustedEmitted = true;
+        this.manager.emit("relay-stream-pwd-exhausted", {
+          status,
+          candidates: this.pwdCandidates.length,
+        });
+      }
       this.manager.emit("relay-stream-rsp-ignored", {
         reason: "native-status-error",
         status,
