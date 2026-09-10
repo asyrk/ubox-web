@@ -2,6 +2,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import CameraPane from "./CameraPane.svelte";
+  import DeviceStatus from "./DeviceStatus.svelte";
   import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
   import PtzControls from "./PtzControls.svelte";
   import StreamQualitySwitch from "./StreamQualitySwitch.svelte";
@@ -42,9 +43,10 @@
 <div class="stream-layout">
   <Card.Root>
     <Card.Header class="panel-head stream-head">
-      <div>
+      <div class="stream-title">
         <Card.Title>{selectedDevice?.name || "Camera"}</Card.Title>
-        <Card.Description>{selectedDevice?.uid}</Card.Description>
+        <Card.Description>{selectedDevice?.uid}{selectedDevice?.modelNum ? ` · Model ${selectedDevice.modelNum}` : ""}</Card.Description>
+        <DeviceStatus device={selectedDevice} />
       </div>
       <StreamQualitySwitch {streamIndex} {busy} {onSetStreamIndex} />
     </Card.Header>
@@ -89,3 +91,11 @@
     onSetWindow={onSetFrameWindow}
   />
 </div>
+
+<style>
+  .stream-title {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+</style>
